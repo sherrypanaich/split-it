@@ -1,0 +1,15 @@
+[Unit]
+Description=House Split
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Expects the app in ~/house-split. Change both paths below if you put it elsewhere.
+WorkingDirectory=%h/house-split
+ExecStart=/usr/bin/env node %h/house-split/server.js
+Environment=PORT=8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,61 @@
+{
+  "name": "Split it",
+  "short_name": "Split it",
+  "description": "Split rent, bills and groceries with your housemates.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F5F1E8",
+  "theme_color": "#1A1626",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Add an expense",
+      "short_name": "Add",
+      "url": "/?do=add",
+      "icons": [
+        {
+          "src": "/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Settle up",
+      "short_name": "Settle",
+      "url": "/?do=settle",
+      "icons": [
+        {
+          "src": "/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    }
+  ],
+  "categories": [
+    "finance",
+    "lifestyle"
+  ]
+}
