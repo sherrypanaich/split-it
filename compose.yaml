@@ -1,0 +1,21 @@
+# docker compose up -d
+# Then: docker compose exec split-it node server.js add-user YOURNAME
+services:
+  split-it:
+    build: .
+    container_name: split-it
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - split-it-data:/data
+    environment:
+      # Fill these in, or mount a split-it.env file at /app/split-it.env
+      - PUBLIC_URL=
+      - RESEND_API_KEY=
+      - MAIL_FROM=
+      - GOOGLE_CLIENT_ID=
+      - GOOGLE_CLIENT_SECRET=
+      - REMIND_HOUR=9
+volumes:
+  split-it-data:
