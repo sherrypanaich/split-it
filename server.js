@@ -50,15 +50,39 @@ fs.mkdirSync(BACKUP_DIR, { recursive: true });
 fs.mkdirSync(PHOTO_DIR, { recursive: true });
 
 // ---------- storage: plain JSON files, written atomically ----------
-const load = (file, empty) => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return empty; } };
+// A missing file means a fresh start. A damaged one never does: we fall back to the newest good
+// copy (users.json.bak, or the latest daily backup of db.json), and refuse to start if there is none,
+// so a bad file can't quietly be replaced by an empty house.
+function load(file, empty, fallbacks = []) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return empty; throw e; }
+  try { return JSON.parse(text); } catch (e) {
+    console.error(`${path.basename(file)} is damaged (${e.message}).`);
+    for (const fb of fallbacks) {
+      try {
+        const data = JSON.parse(fs.readFileSync(fb, 'utf8'));
+        const keep = file + '.damaged-' + Date.now();
+        fs.renameSync(file, keep);
+        fs.copyFileSync(fb, file);
+        console.error(`Restored it from ${path.basename(fb)}. The damaged file was kept as ${path.basename(keep)}.`);
+        return data;
+      } catch {}
+    }
+    console.error(`No good copy found. Split it won't start, so nothing gets overwritten. Fix or replace ${file}, then start it again.`);
+    process.exit(1);
+  }
+}
+const newestBackups = () => { try { return fs.readdirSync(BACKUP_DIR).filter(f => /^db-(weekly-)?\d{4}-\d\d-\d\d\.json$/.test(f))
+  .sort((a, b) => b.replace('weekly-', '').localeCompare(a.replace('weekly-', ''))).map(f => path.join(BACKUP_DIR, f)); } catch { return []; } };
 const save = (file, obj) => {
   const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj));
-  fs.renameSync(tmp, file);
+  const fd = fs.openSync(tmp, 'w');
+  try { fs.writeSync(fd, JSON.stringify(obj)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, file);   // on disk before it replaces the old file, so a power cut leaves one good copy
 };
-let db = load(DB_FILE, { docs: {} });          // { docs: { "groups/g1/members/u1": {...} } }
-let users = load(USERS_FILE, { users: {}, sessions: {} });
-let pushes = load(PUSH_FILE, { subs: {}, remindedOn: null });   // subs: { uid: [subscription, ...] }
+let db = load(DB_FILE, { docs: {} }, newestBackups());          // { docs: { "groups/g1/members/u1": {...} } }
+let users = load(USERS_FILE, { users: {}, sessions: {} }, [USERS_FILE + '.bak']);
+let pushes = load(PUSH_FILE, { subs: {}, remindedOn: null }, [PUSH_FILE + '.bak']);   // subs: { uid: [subscription, ...] }
 // db.json is the big one, so quick bursts of writes are batched into one save a moment later.
 let dbTimer = null, dbDirty = false;
 const flushDb = () => { if (dbTimer) { clearTimeout(dbTimer); dbTimer = null; } if (!dbDirty) return; dbDirty = false; save(DB_FILE, db); };
@@ -182,14 +206,41 @@ function checkLogin(req, name, password) {   // returns the uid, or null (and co
 // ---------- access rules ----------
 const segs = p => String(p || '').split('/').filter(Boolean);
 const validPath = p => /^[A-Za-z0-9_\-.~:@+]+(\/[A-Za-z0-9_\-.~:@+]+)*$/.test(p) && !segs(p).some(s => s === '.' || s === '..');
-function canRead(uid, p) {
+// Who sees what. Your private data is yours alone. Groups, and everything in them (expenses,
+// bills, chores, comments), are seen only by the people in that group. An expense outside a group
+// is seen only by the people in it. Profiles (names, colours) are seen by everyone signed in.
+const memberOf = (uid, gid) => !!gid && (db.docs[`groups/${gid}/members/${uid}`] != null || db.docs['groups/' + gid]?.createdBy === uid);
+function inEntry(uid, e) {
+  if (!e) return false;
+  if (e.groupId) return memberOf(uid, e.groupId);
+  return e.addedBy === uid || e.paidBy === uid || e.from === uid || e.to === uid
+    || (e.people || []).includes(uid) || Object.prototype.hasOwnProperty.call(e.split || {}, uid);
+}
+// doc: the document as it is (or was, for a delete). Leave it out to use what is stored now.
+function canRead(uid, p, doc) {
   const s = segs(p);
   if (s[0] === 'data') return s[1] === 'users' && s[2] === uid;   // private per person
+  if (s[0] === 'groups') {
+    if (memberOf(uid, s[1])) return true;
+    const g = s.length === 2 ? (doc === undefined ? db.docs[p] : doc) : undefined;
+    return s.length === 2 && (g == null || g.createdBy === uid);   // a new group, before anyone is in it
+  }
+  if (s[0] === 'expenses') {
+    if (s.length > 2) return inEntry(uid, db.docs['expenses/' + s[1]]);   // comments follow their expense
+    const e = doc === undefined ? db.docs[p] : doc;
+    return e == null || inEntry(uid, e);
+  }
+  if (s[0] === 'recurring' || s[0] === 'chores') {
+    const d = doc === undefined ? db.docs[p] : doc;
+    return d == null || !d.groupId || memberOf(uid, d.groupId);
+  }
   return true;
 }
-function canWrite(uid, p) {
+// A write must be allowed for the document as it is now and as it will be after.
+function canWrite(uid, p, after) {
   const s = segs(p);
   if (!canRead(uid, p)) return false;
+  if (after !== undefined && !canRead(uid, p, after)) return false;
   if (s[0] === 'people' && s.length === 2) return s[1] === uid;   // only your own profile
   return true;
 }
@@ -198,9 +249,12 @@ function canWrite(uid, p) {
 // Every open page keeps one event stream. A change carries the documents themselves,
 // so phones patch them in place instead of downloading whole collections again.
 const listeners = new Map(); // res -> uid
-function broadcast(paths, extra) {
+function broadcast(paths, extra, before = {}) {
   for (const [res, uid] of listeners) {
-    const visible = paths.filter(p => canRead(uid, p));
+    const visible = paths.filter(p => canRead(uid, p, db.docs[p] ?? before[p] ?? null));
+    // joined or left a group: what this person can see changed, so their phone reloads its lists
+    if (paths.some(p => { const s = segs(p); return s[0] === 'groups' && s[2] === 'members' && s[3] === uid && (p in before) && (before[p] == null) !== (db.docs[p] == null); }))
+      res.write('event: refresh\ndata: {}\n\n');
     if (!visible.length && !extra) continue;
     const docs = {}; for (const p of visible) docs[p] = db.docs[p] ?? null;
     res.write(`event: change\ndata: ${JSON.stringify({ paths: visible, docs, ...(extra || {}) })}\n\n`);
@@ -221,6 +275,7 @@ function backup() {
     for (const f of old.slice(0, Math.max(0, old.length - keep))) fs.unlinkSync(path.join(BACKUP_DIR, f)); };
   trim(/^db-\d{4}-\d\d-\d\d\.json$/, KEEP_BACKUPS);
   trim(/^db-weekly-\d{4}-\d\d-\d\d\.json$/, KEEP_WEEKLY);
+  for (const f of [USERS_FILE, PUSH_FILE]) try { JSON.parse(fs.readFileSync(f, 'utf8')); fs.copyFileSync(f, f + '.bak'); } catch {}
   pruneSessions();
   prunePhotos();
 }
@@ -572,9 +627,11 @@ async function monthlySummaries(now) {
 
 // On the 1st and 15th: a friendly nudge to anyone who owes $5+ to someone who has reminders on.
 async function owedReminders() {
-  const per = {};
-  for (const [k, amt] of Object.entries(allDebts())) {
-    const [from, to] = k.split('|');
+  const per = {}, pending = {};
+  // a payment still waiting for the other person to confirm counts as paid here, so nobody gets nagged for it
+  for (const e of sharedEntries()) if (e.kind === 'payment' && e.confirmed === false) pending[e.from + '|' + e.to] = (pending[e.from + '|' + e.to] || 0) + e.amount;
+  for (const [k, owed] of Object.entries(allDebts())) {
+    const [from, to] = k.split('|'), amt = owed - (pending[k] || 0);
     if (amt < 500 || !users.users[from] || !users.users[to] || db.docs['people/' + to]?.autoRemind === false) continue;
     (per[from] = per[from] || []).push({ to, amt });
   }
@@ -860,10 +917,11 @@ async function handle(req, res) {
   if (p === '/api/col') {
     const cp = url.searchParams.get('path');
     if (!validPath(cp) || !(segs(cp).length % 2)) return send(res, 400, { error: 'bad path' });
-    if (!canRead(uid, cp + '/x')) return send(res, 403, { error: 'not allowed' });
+    const cs = segs(cp);
+    if (cs[0] === 'data' && !canRead(uid, cp + '/x')) return send(res, 403, { error: 'not allowed' });
     const prefix = cp + '/', docs = [];
     for (const [k, v] of Object.entries(db.docs))
-      if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/')) docs.push({ id: k.slice(prefix.length), data: v });
+      if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/') && canRead(uid, k)) docs.push({ id: k.slice(prefix.length), data: v });
     return send(res, 200, { docs });
   }
   if (p === '/api/write' && req.method === 'POST') {
@@ -871,9 +929,10 @@ async function handle(req, res) {
     if (!Array.isArray(ops) || !ops.length || ops.length > 100) return send(res, 400, { error: 'bad ops' });
     for (const o of ops) {
       if (!validPath(o.path) || segs(o.path).length % 2) return send(res, 400, { error: 'bad path' });
-      if (!canWrite(uid, o.path)) return send(res, 403, { error: 'not allowed' });
       if (o.op !== 'delete' && (typeof o.data !== 'object' || !o.data || Array.isArray(o.data))) return send(res, 400, { error: 'bad data' });
       if (o.op === 'update' && db.docs[o.path] == null) return send(res, 404, { error: 'not found: ' + o.path });
+      const after = o.op === 'set' ? o.data : o.op === 'update' ? { ...db.docs[o.path], ...o.data } : undefined;
+      if (!canWrite(uid, o.path, after)) return send(res, 403, { error: 'not allowed' });
     }
     const before = Object.fromEntries(ops.map(o => [o.path, db.docs[o.path]]));
     for (const o of ops) {
@@ -882,9 +941,10 @@ async function handle(req, res) {
       else if (o.op === 'delete') delete db.docs[o.path];
     }
     saveDb();
-    broadcast(ops.map(o => o.path));
+    broadcast(ops.map(o => o.path), null, before);
     send(res, 200, { ok: true });
     tellPeople(uid, ops, before).catch(e => console.error(e));
+    if (ops.some(o => segs(o.path)[0] === 'recurring')) setImmediate(() => { try { postDueBills(); } catch (e) { console.error(e); } });   // a new bill due today shows up now
     return;
   }
   if (p === '/api/events') {

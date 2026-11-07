@@ -1667,6 +1667,13 @@ function viewHome(){
   h += `</div></div>`;
   return h;
 }
+// what a filled-in bill covers, in words: "November", "the week of Nov 3", "2026"
+function billPeriod(e){
+  const every = S.recurringRaw.find(r => r._id===e.recurringId)?.every || 'month';
+  if(every==='week') return {unit:'week', label:'the week of '+new Date(e.date+'T12:00').toLocaleDateString('en-CA',{month:'short', day:'numeric'})};
+  if(every==='year') return {unit:'year', label:e.date.slice(0,4)};
+  return {unit:'month', label:monthName(e.date.slice(0,7))};
+}
 function needsYou(gid){
   const out = [], groups = gid ? [S.groups[gid]] : myGroups();
   for(const g of groups){
@@ -1674,7 +1681,7 @@ function needsYou(gid){
       <div class="m">Are they “${esc(nameOf(p))}” who was added before they joined? Linking moves those expenses to their account.</div></div></div>
       <div class="acts"><button class="btn sm primary" data-link="${g.id}|${p}|${a}">Link them</button></div></div>`));
     alive(groupEntries(g.id)).filter(e=>e.status==='needs_amount').forEach(e => out.push(`<div class="todo"><div class="line"><span class="ic">${catIcon(e.category)}</span><div class="body">
-      <div class="t">${esc(e.title)} for ${monthName(e.date.slice(0,7))}</div><div class="m">${gid?'':esc(g.name)+'. '}Needs this month’s amount. ${esc(youOr(e.paidBy))} ${e.paidBy===myUid?'have':'has'} the bill.</div></div></div>
+      <div class="t">${esc(e.title)} for ${billPeriod(e).label}</div><div class="m">${gid?'':esc(g.name)+'. '}Needs this ${billPeriod(e).unit}’s amount. ${esc(youOr(e.paidBy))} ${e.paidBy===myUid?'have':'has'} the bill.</div></div></div>
       ${canWrite?`<div class="acts"><button class="btn sm primary" data-fill="${esc(e._id)}">Enter amount</button></div>`:''}</div>`));
   }
   S.recurringRaw.filter(r => !r.paused && r.paidBy===myUid && (gid ? r.groupId===gid : myGroups().some(g=>g.id===r.groupId))).forEach(r => { const d = nextDue(r);
@@ -2507,6 +2514,9 @@ function openDetail(id, priv){
         cl.innerHTML = s.docs.length ? s.docs.map(d => { const c = d.data();
           return `<div class="comment">${av(c.by,'sm')}<div class="body"><div class="who">${esc(youOr(c.by))}, ${esc(whenLabel(c.at))}</div><p>${esc(c.text)}</p></div></div>`; }).join('')
           : `<div class="comment"><span class="mut">No comments yet. Ask about it here instead of the group chat.</span></div>`;
+        // two people commenting at once can each count one; the list itself is the true count
+        const cur = S.expensesRaw.find(x=>x._id===e._id);
+        if(canWrite && cur && s.docs.length > (cur.comments||0) && s.docs.length < 200) write(()=>db.doc('expenses/'+e._id).update({comments:s.docs.length}), true);
       }, () => { const cl = sh.querySelector('#cl'); if(cl) cl.innerHTML = '<div class="comment"><span class="mut">Comments didn’t load.</span></div>'; });
       const cs = sh.querySelector('#cs'), ci = sh.querySelector('#ci');
       if(cs){ const send = async () => { const t = ci.value.trim(); if(!t) return; cs.disabled = true;
@@ -3338,6 +3348,7 @@ function runPendingDo(){
 /* ================= monthly bills auto-posting ================= */
 let posting = false;
 async function postDueBills(){
+  if(LAPTOP) return;   // the laptop server posts bills itself, so a phone with an old copy can't overwrite one
   if(posting || !canWrite || !myUid || !S.got.recurring || !S.got.expenses) return;
   posting = true;
   try{
