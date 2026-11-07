@@ -18,7 +18,7 @@ const readline = require('readline');
 const zlib = require('zlib');
 const push = require('./push');
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const STARTED = Date.now();
 
 // Optional settings file next to this one: KEY=value per line (see split-it.env.example).

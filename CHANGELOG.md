@@ -1,5 +1,25 @@
 # What's new in Split it
 
+## 2.1 (November 2026)
+
+**Safer**
+- Groups are private: people only see the groups they're in, and expenses they're part of. A friend you split one dinner with no longer sees the house.
+- A damaged data file (say the laptop lost power mid-save) no longer starts an empty house. Split it restores the newest backup, or refuses to start so nothing gets overwritten.
+- Changes made offline wait if your sign-in expired, and new changes queue behind them so everything arrives in order.
+- Emails with sign-in and reset links only go out once `PUBLIC_URL` is set.
+- A phone with an old copy can't overwrite a bill amount someone already filled in. New bills due today post right away.
+- Reminders don't nag you about a payment you've marked paid that's waiting to be confirmed.
+
+**New**
+- Money coming in: refunds, a deposit back or something sold. It comes off everyone's share.
+- Payments get a date (for ones you record late) and a note, like an e-Transfer reference.
+- The phone's Back button closes the open sheet, then goes back a page, instead of closing the app.
+- A number on the Home tab, and on the app icon where the phone supports it, for things that need you.
+- Search finds amounts: "54" or "54.20".
+- Editing an expense someone else just changed warns you before you overwrite their change.
+- Your guide shows up on empty screens, cheers when your payment gets confirmed, when you clear everything that needs you, and at 7, 30 and 100 days even. A coin hops across when you pay.
+- Weekly and yearly bills say "this week's" or "this year's" amount.
+
 ## 2.0 (November 2026)
 
 **Faster**
