@@ -27,6 +27,8 @@
   const QKEY = 'hs-queue';
   const queue = () => { try { return JSON.parse(localStorage.getItem(QKEY) || '[]'); } catch { return []; } };
   const setQueue = qq => { try { localStorage.setItem(QKEY, JSON.stringify(qq)); } catch {} window.dispatchEvent(new CustomEvent('hs-queue', { detail: { pending: qq.length } })); };
+  // Each queued change remembers who made it, so it is never sent under someone else's sign-in on a shared phone.
+  let who = null;
   let offline = null;
   const offlineNow = v => { if (offline === v) return; offline = v; window.dispatchEvent(new Event(v ? 'hs-offline' : 'hs-online')); if (!v) flush(); };
   // What the queue says a collection looks like, laid over what the server last sent.
@@ -45,13 +47,15 @@
     if (flushing || !queue().length) return; flushing = true;
     try {
       while (queue().length) {
-        const [first, ...rest] = queue();
-        try { await api('/api/write', { ops: [first] }); setQueue(rest); }
+        const [item] = queue(), { by, ...first } = item;
+        if (by && who && by !== who) { console.warn('Dropped a change another person made offline on this phone', first); setQueue(queue().slice(1)); continue; }
+        // re-read after the wait: changes made while this one was sending were added to the stored queue
+        try { await api('/api/write', { ops: [first] }); setQueue(queue().slice(1)); }
         catch (e) {
           // Not reachable, signed out, or the laptop is busy: keep the change and try again later.
           if (e.offline || e.code === 'unauthenticated' || e.code === 'unavailable') break;
           // The server said no for good (not allowed, or the thing is gone): skip it, and say so.
-          console.warn('Skipped a change made offline:', e.message, first); setQueue(rest);
+          console.warn('Skipped a change made offline:', e.message, first); setQueue(queue().slice(1));
           window.dispatchEvent(new CustomEvent('hs-dropped', { detail: { message: e.message } }));
         }
       }
@@ -65,7 +69,7 @@
     try { if (waiting) throw Object.assign(fail('waiting for older changes', 'unavailable'), { offline: true }); return await api('/api/write', { ops }); }
     catch (e) {
       if (!e.offline) throw e;
-      setQueue([...queue(), ...ops]); if (waiting) flush(); else offlineNow(true);
+      setQueue([...queue(), ...ops.map(o => ({ ...o, by: who }))]); if (waiting) flush(); else offlineNow(true);
       // show the change right away, as if the server had confirmed it
       for (const op of ops) for (const s of subs) {
         if (s.path !== parentOf(op.path) || !s.patch) continue;
@@ -180,7 +184,7 @@
   const db = { doc: docRef, collection: p => colRef(p) };
 
   let me = null;
-  const getMe = () => me || (me = api('/api/me'));
+  const getMe = () => me || (me = api('/api/me').then(m => { who = m.uid; return m; }));
   const user = {
     id: async () => (await getMe()).uid,
     isOwner: async () => (await getMe()).isOwner,

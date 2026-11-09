@@ -1,5 +1,50 @@
 # What's new in Split it
 
+## v2.2.0 · Draft, not released yet
+
+**Moving out, made easy.** Anyone in a group can record a payment they saw, moving someone out shows exactly what clears them, and a round of fixes makes sign-out, backups and offline changes safer.
+
+### Highlights
+- **Record a payment you saw.** Kim handed Alex cash in the kitchen? Anyone in the group can record it. Alex gets the usual "did you get it?" to confirm.
+- **Move-out helper.** Moving someone out lists the payments that clear their balance, each with a Record button, then lets you pick who takes over the bills they paid.
+- **Safer sign-out.** Resetting a password or signing out everywhere now also stops live updates on the old phone and signs out any AI assistant that person connected.
+
+### New
+- Record a payment between two other people in the group. The settle-up list shows "Record it" on their transfer, and "waiting for … to confirm" once it's recorded.
+- On a person's page in a group: the transfers that clear their balance, and "Who pays these bills now?" when they pay a bill.
+- Quick add understands money coming in: "refund 20 from costco" or "sold the couch 90" opens with Money coming in turned on.
+- Tests run on GitHub for every pull request.
+
+### Improved
+- Amounts with a decimal comma ("12,50") are read as $12.50. A thousands comma ("1,250.00") still works.
+- "Last time" on a new expense only looks at entries of the same kind, so a refund never suggests a charge and the other way around.
+- Bills split by percentage say so, with each person's %.
+- Keyboard: sheets take focus when they open, keep Tab inside, and give focus back when they close. Your guide can be reached with Tab and opened with Enter.
+- Better contrast for the green "owed" text in light mode and for initials on bright colours.
+- The group page's buttons wrap on very narrow phones instead of running off the edge.
+
+### Fixed
+- Changes made offline could be lost if you added another one while the first was still sending.
+- Moving a bill's next due date later (say Dec 1 to Jan 1) still charged the month in between.
+- Filling in an older variable bill used the bill's current split instead of the one it was posted with.
+- A month where refunds beat spending drew its bar and category rows below zero. It now shows as zero.
+- New profiles start with a guide picked in the picker, not a random one.
+- Someone taken off an expense, or whose expense moved to another group, now sees it disappear right away instead of after a reload.
+- The AI assistant could create a person called "me" when asked to split or pay "with me".
+- One badly encoded cookie from another app on the same laptop could stop every page from loading.
+- The only owner could remove their own owner status, leaving nobody able to open the owner tools.
+
+### Security
+- Password reset, "Sign out everywhere" and the owner's "Sign out" now close that person's open live-update streams and revoke their AI assistant access.
+- Restoring a backup brings back the notification keys too, so phones keep getting notifications on a new laptop.
+- Restoring a backup no longer brings back sign-ins that were signed out after the backup was made.
+- Changes queued offline remember who made them, so on a shared phone they're never sent as the next person who signs in.
+- A restore file with empty data is refused instead of crashing the server.
+
+### Known issues
+- The command-line `remove-user` and `set-password` commands should be run with the server stopped. A running server can write its own copy back over them.
+- The sign-out, backup and offline-queue changes only apply to the laptop app, not the Claude artifact preview.
+
 ## v2.1.0 · November 9, 2026
 
 **Safer by default, plus money coming in.** Groups are now private to the people in them, your data survives a bad shutdown, and you can record refunds and deposits coming back.

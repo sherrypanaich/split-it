@@ -18,7 +18,7 @@ const readline = require('readline');
 const zlib = require('zlib');
 const push = require('./push');
 
-const VERSION = '2.1.0';
+const VERSION = '2.2.0';
 const STARTED = Date.now();
 
 // Optional settings file next to this one: KEY=value per line (see split-it.env.example).
@@ -173,8 +173,9 @@ async function cli([cmd, ...rest]) {
 }
 
 // ---------- sessions ----------
+const unesc = v => { try { return decodeURIComponent(v); } catch { return v; } };   // another app's odd cookie must not break sign-in
 const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';')
-  .map(c => c.trim().split('=')).filter(p => p[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join('='))]));
+  .map(c => c.trim().split('=')).filter(p => p[0]).map(([k, ...v]) => [k, unesc(v.join('='))]));
 function sessionUid(req) {
   const t = cookies(req).hs, s = t && users.sessions[t];
   if (!s || s.exp < Date.now() || !users.users[s.uid]) return null;
@@ -249,15 +250,28 @@ function canWrite(uid, p, after) {
 // Every open page keeps one event stream. A change carries the documents themselves,
 // so phones patch them in place instead of downloading whole collections again.
 const listeners = new Map(); // res -> uid
+const streamToken = new Map(); // res -> the session it was opened with
+// Sign a person out: their sessions (all, or all but `keep`), the live streams those sessions opened,
+// and, when `assistants` is set, any AI assistant they connected. Used by reset, sign out everywhere and the owner tools.
+function endSessions(uid, { keep = null, assistants = false } = {}) {
+  let n = 0;
+  for (const [t, s] of Object.entries(users.sessions)) if (s.uid === uid && t !== keep) { delete users.sessions[t]; n++; }
+  saveUsers();
+  for (const [res, who] of listeners) if (who === uid && streamToken.get(res) !== keep) { try { res.end(); } catch {} listeners.delete(res); streamToken.delete(res); }
+  if (assistants) mcp.revoke(uid);
+  return n;
+}
 function broadcast(paths, extra, before = {}) {
   for (const [res, uid] of listeners) {
     const visible = paths.filter(p => canRead(uid, p, db.docs[p] ?? before[p] ?? null));
     // joined or left a group: what this person can see changed, so their phone reloads its lists
     if (paths.some(p => { const s = segs(p); return s[0] === 'groups' && s[2] === 'members' && s[3] === uid && (p in before) && (before[p] == null) !== (db.docs[p] == null); }))
       res.write('event: refresh\ndata: {}\n\n');
-    if (!visible.length && !extra) continue;
-    const docs = {}; for (const p of visible) docs[p] = db.docs[p] ?? null;
-    res.write(`event: change\ndata: ${JSON.stringify({ paths: visible, docs, ...(extra || {}) })}\n\n`);
+    // taken off an expense (or it moved to a group they're not in): to them it's gone
+    const gone = paths.filter(p => !visible.includes(p) && before[p] != null && db.docs[p] != null && canRead(uid, p, before[p]));
+    if (!visible.length && !gone.length && !extra) continue;
+    const docs = {}; for (const p of visible) docs[p] = db.docs[p] ?? null; for (const p of gone) docs[p] = null;
+    res.write(`event: change\ndata: ${JSON.stringify({ paths: [...visible, ...gone], docs, ...(extra || {}) })}\n\n`);
   }
 }
 const tellEveryone = (event, data) => { for (const res of listeners.keys()) res.write(`event: ${event}\ndata: ${JSON.stringify(data || {})}\n\n`); };
@@ -337,7 +351,7 @@ function restoreZip(buf) {
   const files = zipRead(buf);
   if (!files['db.json']) throw new Error('That zip has no db.json in it.');
   const next = JSON.parse(files['db.json'].toString('utf8'));
-  if (!next || typeof next.docs !== 'object') throw new Error('db.json in that zip doesn’t look like Split it data.');
+  if (!next || !next.docs || typeof next.docs !== 'object' || Array.isArray(next.docs)) throw new Error('db.json in that zip doesn’t look like Split it data.');
   let nextUsers = null;
   if (files['users.json']) { nextUsers = JSON.parse(files['users.json'].toString('utf8')); if (!nextUsers.users) throw new Error('users.json in that zip doesn’t look right.'); }
   // keep what we have first, so a restore can itself be undone
@@ -345,7 +359,11 @@ function restoreZip(buf) {
   flushDb();
   for (const f of ['db.json', 'users.json', 'push.json']) { const fp = path.join(DATA_DIR, f); if (fs.existsSync(fp)) fs.copyFileSync(fp, path.join(BACKUP_DIR, `before-restore-${stamp}-${f}`)); }
   db = next; dbDirty = true; flushDb();
-  if (nextUsers) { users = nextUsers; users.sessions = users.sessions || {}; saveUsers(); }
+  // Sessions are not restored: the ones signed out since the backup stay signed out, and current ones keep working if that person is still there.
+  if (nextUsers) { const now = users.sessions || {}; users = nextUsers; users.sessions = {};
+    for (const [t, s] of Object.entries(now)) if (users.users[s.uid]) users.sessions[t] = s;
+    saveUsers(); }
+  if (files['push-keys.json']) { try { const k = JSON.parse(files['push-keys.json'].toString('utf8')); if (k.publicKey && k.privateJwk) { fs.writeFileSync(PUSH_KEYS_FILE, files['push-keys.json']); pushKeys = push.loadKeys(PUSH_KEYS_FILE); } } catch {} }
   if (files['push.json']) { try { pushes = JSON.parse(files['push.json'].toString('utf8')); savePushes(); } catch {} }
   if (files['oauth.json']) fs.writeFileSync(path.join(DATA_DIR, 'oauth.json'), files['oauth.json']);
   let photos = 0;
@@ -355,7 +373,7 @@ function restoreZip(buf) {
 }
 
 // ---------- phone notifications ----------
-const pushKeys = push.loadKeys(PUSH_KEYS_FILE);
+let pushKeys = push.loadKeys(PUSH_KEYS_FILE);
 const nudges = new Map();
 const money = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' });
 const cad = cents => money.format((cents || 0) / 100);
@@ -860,7 +878,7 @@ async function handle(req, res) {
     }
     if (p === '/api/admin/owner' && req.method === 'POST') {
       const { id, owner } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
-      if (!owner && onlyOwner(id)) return send(res, 400, { error: 'Split it needs at least one owner.' });
+      if (!owner && users.users[id].owner && Object.values(users.users).filter(x => x.owner).length === 1) return send(res, 400, { error: 'Split it needs at least one owner.' });
       users.users[id].owner = !!owner; saveUsers();
       return send(res, 200, { ok: true });
     }
@@ -872,9 +890,8 @@ async function handle(req, res) {
       return send(res, 200, { ok: true });
     }
     if (p === '/api/admin/signout' && req.method === 'POST') {
-      const { id } = await readBody(req); let n = 0;
-      for (const [t, s] of Object.entries(users.sessions)) if (s.uid === id) { delete users.sessions[t]; n++; }
-      saveUsers(); return send(res, 200, { ok: true, sessions: n });
+      const { id } = await readBody(req);
+      return send(res, 200, { ok: true, sessions: endSessions(id, { assistants: true }) });
     }
     if (p === '/api/admin/backup') {
       const stamp = new Date().toISOString().slice(0, 10);
@@ -950,14 +967,14 @@ async function handle(req, res) {
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(`: hi\nevent: hello\ndata: ${JSON.stringify({ version: VERSION })}\n\n`);
-    listeners.set(res, uid);
-    req.on('close', () => listeners.delete(res));
+    listeners.set(res, uid); streamToken.set(res, cookies(req).hs || null);
+    req.on('close', () => { listeners.delete(res); streamToken.delete(res); });
     return;
   }
   send(res, 404, { error: 'not found' });
 }
 
-const accounts = require('./accounts')({ users: () => users, saveUsers, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
+const accounts = require('./accounts')({ users: () => users, saveUsers, endSessions, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
   setCookie, cookies, clientIp, misses, tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS });
 
 // AI assistant connector (Muse, Claude...): see mcp.js

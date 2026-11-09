@@ -236,7 +236,7 @@ module.exports = function accounts(h) {
       if (String(password || '').length < 8) return send(res, 400, { error: 'Use at least 8 characters.' }), true;
       takeCode('reset', String(token));
       Object.assign(U().users[c.uid], hashPw(String(password)));
-      for (const [k, s] of Object.entries(U().sessions)) if (s.uid === c.uid) delete U().sessions[k];   // sign out everywhere else
+      h.endSessions(c.uid, { assistants: true });   // sign out everywhere else, assistants too
       startSession(req, res, c.uid);
       return send(res, 200, { ok: true }), true;
     }
@@ -291,8 +291,7 @@ module.exports = function accounts(h) {
       if (String(next || '').length < 8) return send(res, 400, { error: 'Use at least 8 characters for the new password.' }), true;
       Object.assign(me, hashPw(String(next)));
       const mine = cookies(req).hs;
-      for (const [k, s] of Object.entries(U().sessions)) if (s.uid === uid && k !== mine) delete U().sessions[k];
-      saveUsers();
+      h.endSessions(uid, { keep: mine });
       return send(res, 200, { ok: true }), true;
     }
     if (p === '/api/account/google' && m === 'DELETE') {
@@ -301,8 +300,7 @@ module.exports = function accounts(h) {
       return send(res, 200, { ok: true }), true;
     }
     if (p === '/api/account/signout-all' && m === 'POST') {
-      for (const [k, s] of Object.entries(U().sessions)) if (s.uid === uid) delete U().sessions[k];
-      saveUsers(); setCookie(req, res, '', 0);
+      h.endSessions(uid, { assistants: true }); setCookie(req, res, '', 0);
       return send(res, 200, { ok: true }), true;
     }
     return false;

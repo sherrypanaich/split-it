@@ -300,6 +300,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
           if (!a.with_person) throw new Error('Give a group, or with_person for a one-on-one expense.');
           const others = Object.keys(h.users().users).filter(id => id !== uid);
           const r = pick(a.with_person, others); if (r.err) throw new Error(r.err + ' (One-on-one only works with people who use the app; use a group for others.)');
+          if (r.id === '__me__') throw new Error('with_person is the other person, not you.');
           pool = [uid, r.id];
         }
         const who = n => { const r = pick(n, pool); if (r.err) throw new Error(r.err); return r.id === '__me__' ? uid : r.id; };
@@ -326,7 +327,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         let g = null, pool;
         if (a.group) { const r = findGroup(uid, a.group); if (r.err) throw new Error(r.err); g = r.g; pool = memberDocs(g.id).filter(m => m.active !== false).map(m => m.id); }
         else pool = Object.keys(h.users().users);
-        const r = pick(a.to, pool.filter(id => id !== uid)); if (r.err) throw new Error(r.err);
+        const r = pick(a.to, pool.filter(id => id !== uid)); if (r.err) throw new Error(r.err); if (r.id === '__me__') throw new Error('You can’t pay yourself. Give the name of the person you paid.');
         const to = r.id, confirmed = !h.users().users[to];
         const id = 'p' + rand(6).replace(/[^A-Za-z0-9]/g, '') + Date.now().toString(36).slice(-3);
         save(uid, id, { kind: 'payment', from: uid, to, amount, date: today(), createdAt: Date.now(), addedBy: uid, confirmed, people: [uid, to], groupId: g ? g.id : null, via: 'assistant' });
