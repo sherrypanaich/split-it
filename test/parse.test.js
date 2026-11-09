@@ -25,3 +25,13 @@ test('yesterday', () => { const r = localParse('coffee 4.50 yesterday'); const y
 test('today by default', () => { assert.equal(localParse('bagels 12').date, d()); });
 test('no amount means no amount', () => { assert.ok(!localParse('dinner with everyone').amount); });
 test('monthly makes a repeating bill', () => { assert.equal(localParse('netflix 16.99 monthly').repeatMonthly, true); });
+
+test('amounts: a decimal comma is cents, a thousands comma is not', () => {
+  const toCents = new Function(line(/^const toCents = .*$/m) + '\nreturn toCents;')();
+  assert.equal(toCents('12,50'), 1250);
+  assert.equal(toCents('12,5'), 1250);
+  assert.equal(toCents('1,250.00'), 125000);
+  assert.equal(toCents('1,250'), 125000);
+  assert.equal(toCents('$54.20'), 5420);
+  assert.equal(toCents(''), 0);
+});

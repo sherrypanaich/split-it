@@ -330,7 +330,7 @@ textarea.in{resize:vertical;min-height:60px}
    MANGA THEME: ink outlines, hard shadows, halftone paper, panel layouts
    ===================================================================== */
 :root{--bg:#F5F1E8;--surface:#FFFFFF;--surface2:#F1ECE1;--ink:#14112A;--edge:#14112A;--pop:#14112A;--on-bg:#14112A;--on-ink:#F5F1E8;--on-pop:#FFD23F;--muted:#5D5870;--line:rgba(20,17,42,.14);
-  --accent:#2D5BFF;--accent-ink:#FFFFFF;--accent-soft:#FFF1B8;--hl:#FFD23F;--owed:#0E8A4F;--owe:#E0243C;--dot:rgba(20,17,42,.07)}
+  --accent:#2D5BFF;--accent-ink:#FFFFFF;--accent-soft:#FFF1B8;--hl:#FFD23F;--owed:#0B7A45;--owe:#E0243C;--dot:rgba(20,17,42,.07)}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121019;--surface:#1D1A2A;--surface2:#262236;--ink:#F1EEFF;--edge:#9C94C8;--pop:#5B5391;--on-bg:#F1EEFF;--on-ink:#14112A;--on-pop:#FFD23F;--muted:#ADA7C6;--line:rgba(241,238,255,.10);
   --accent:#8EA6FF;--accent-ink:#121019;--accent-soft:#3A3120;--hl:#FFD23F;--owed:#4FD39A;--owe:#FF6B7D;--dot:rgba(241,238,255,.10)}}
 :root[data-theme="dark"]{--bg:#121019;--surface:#1D1A2A;--surface2:#262236;--ink:#F1EEFF;--edge:#9C94C8;--pop:#5B5391;--on-bg:#F1EEFF;--on-ink:#14112A;--on-pop:#FFD23F;--muted:#ADA7C6;--line:rgba(241,238,255,.10);
@@ -377,6 +377,7 @@ nav.tabs .tab[aria-current="page"]{color:var(--ink)}
 nav.tabs .tab[aria-current="page"] svg{background:var(--hl);border-radius:10px;padding:2px;box-shadow:2px 2px 0 var(--pop);stroke:#14112A}
 nav.tabs .add{background:var(--hl);color:#14112A;border:3px solid var(--edge);box-shadow:3px 3px 0 var(--pop);border-radius:16px}
 .sheet{border:3px solid var(--edge);border-bottom:none;border-radius:20px 20px 0 0}
+.sheet:focus{outline:none}
 .grab{background:var(--edge);opacity:.5}
 .close{border:2.5px solid var(--edge);box-shadow:2px 2px 0 var(--pop)}
 .sheet .foot{border-top:2.5px solid var(--edge)}
@@ -798,7 +799,8 @@ const nextYm = ym => { let [y,m]=ym.split('-').map(Number); m++; if(m>12){m=1;y+
 const prevYm = ym => { let [y,m]=ym.split('-').map(Number); m--; if(m<1){m=12;y--;} return y+'-'+pad(m); };
 const daysIn = ym => { const [y,m]=ym.split('-').map(Number); return new Date(y,m,0).getDate(); };
 const ordinal = n => n + (n%100>=11&&n%100<=13 ? 'th' : ({1:'st',2:'nd',3:'rd'}[n%10]||'th'));
-const toCents = v => { const n = parseFloat(String(v).replace(/[^0-9.]/g,'')); return isFinite(n) ? Math.round(n*100) : 0; };
+// "12,50" is 12.50 (French-style decimal comma); "1,250.00" is 1250 (thousands comma).
+const toCents = v => { let t = String(v).trim(); t = /^\$?\s*\d+,\d{1,2}$/.test(t) ? t.replace(',', '.') : t.replace(/,/g,''); const n = parseFloat(t.replace(/[^0-9.]/g,'')); return isFinite(n) ? Math.round(n*100) : 0; };
 const monthLabel = (ym, short) => { const [y,m]=ym.split('-').map(Number); return new Date(y,m-1,1).toLocaleDateString('en-CA',short?{month:'short'}:{month:'long',year:'numeric'}); };
 const monthName = ym => monthLabel(ym).split(' ')[0];
 const dayLabel = d => { if(!d) return ''; if(d===today()) return 'Today'; const y=new Date(); y.setDate(y.getDate()-1);
@@ -807,7 +809,7 @@ const whenLabel = t => { if(!t) return ''; const l = dayLabel(dateStr(new Date(t
 const newId = p => (p||'x') + Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-3);
 const hash = s => { let h = 2166136261; for(const c of String(s)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; };
 const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
-const inkOn = hex => { const n=parseInt(hex.slice(1),16), r=n>>16, g=n>>8&255, b=n&255; return (r*299+g*587+b*114)/1000 > 160 ? '#1B1830' : '#FFFFFF'; };
+const inkOn = hex => { const n=parseInt(hex.slice(1),16), r=n>>16, g=n>>8&255, b=n&255; return (r*299+g*587+b*114)/1000 > 140 ? '#1B1830' : '#FFFFFF'; };
 const sumOf = o => Object.values(o||{}).reduce((s,v)=>s+v,0);
 const signed = c => (c>0?'+':c<0?'−':'')+money(Math.abs(c));
 
@@ -1029,7 +1031,7 @@ function lulu(mood, cls, key){
   const k = ART[key] ? key : myChar();
   const face = MOODS.includes(mood) ? mood : 'calm';
   const stack = (cls||'').split(' ').includes('hart');
-  return `<span class="fig art-${k} has-img ${cls||''}" data-mood="${face}" data-char="${k}">${stack ? artStack(ART[k], face) : artOf(ART[k], face)}</span>`;
+  return `<span class="fig art-${k} has-img ${cls||''}" data-mood="${face}" data-char="${k}"${stack?' role="button" tabindex="0" aria-label="Tips from your guide"':''}>${stack ? artStack(ART[k], face) : artOf(ART[k], face)}</span>`;
 }
 const BURST = (w,h,n,ri) => { let p = []; for(let i=0;i<n*2;i++){ const a = i/(n*2)*Math.PI*2, r = i%2 ? ri : 1; p.push([w/2+Math.cos(a)*w/2*r, h/2+Math.sin(a)*h/2*r]); } return P(p); };
 function celebrate(msg, full){
@@ -1121,8 +1123,12 @@ async function write(fn, quiet){
 function openSheet(html, mount){
   if(S.sheetUnsub){ S.sheetUnsub(); S.sheetUnsub=null; } document.querySelectorAll('.toast').forEach(t=>t.classList.add('top'));
   if(!layer.firstElementChild || layer.firstElementChild.classList.contains('out')) navPush('push', {tab:S.tab, page:S.page, sheet:true});
-  layer.innerHTML = `<div class="scrim"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div></div>`;
+  // keyboard: remember what opened the sheet, move focus into it, and give it back on close
+  if(!layer.contains(document.activeElement)) sheetOpener = document.activeElement;
+  layer.innerHTML = `<div class="scrim"><div class="sheet" role="dialog" aria-modal="true" tabindex="-1"><div class="grab"></div>${html}</div></div>`;
   const scrim = layer.firstElementChild;
+  const lbl = scrim.querySelector('.head h3'); if(lbl){ lbl.id = 'sheetTitle'; scrim.firstElementChild.setAttribute('aria-labelledby', 'sheetTitle'); }
+  scrim.firstElementChild.focus({preventScroll:true});
   scrim.addEventListener('click', e => { if(e.target===scrim) closeSheet(); });
   scrim.querySelectorAll('[data-close]').forEach(b=>b.onclick=closeSheet);
   mount && mount(scrim.querySelector('.sheet'));
@@ -1130,9 +1136,17 @@ function openSheet(html, mount){
 function closeSheet(fromBack){ if(S.sheetUnsub){ S.sheetUnsub(); S.sheetUnsub=null; }
   const sc = layer.firstElementChild; if(!sc) return;
   if(fromBack !== true && NAV && history.state?.sheet) navPush('replace', {tab:S.tab, page:S.page, sheet:false});
+  if(sheetOpener && document.contains(sheetOpener) && layer.contains(document.activeElement)) sheetOpener.focus({preventScroll:true}); sheetOpener = null;
   if(reduceMotion || sc.classList.contains('out')){ layer.innerHTML=''; return; }
   sc.classList.add('out'); setTimeout(() => sc.remove(), 210); }
-document.addEventListener('keydown', e => { if(e.key==='Escape') closeSheet(); });
+let sheetOpener = null;
+document.addEventListener('keydown', e => { if(e.key==='Escape') closeSheet();
+  // Tab stays inside an open sheet
+  const sh = e.key==='Tab' && layer.querySelector('.scrim:not(.out) .sheet'); if(!sh) return;
+  const f = [...sh.querySelectorAll('button,input,select,textarea,a[href],[tabindex]:not([tabindex="-1"])')].filter(x => !x.disabled && !x.hidden && x.offsetParent !== null);
+  if(!f.length) return; const first = f[0], last = f[f.length-1];
+  if(e.shiftKey && (document.activeElement===first || document.activeElement===sh)){ e.preventDefault(); last.focus(); }
+  else if(!e.shiftKey && (document.activeElement===last || !sh.contains(document.activeElement))){ e.preventDefault(); first.focus(); } });
 const head = t => `<div class="head"><h3>${t}</h3><button class="close" data-close aria-label="Close">${icon('x','x')}</button></div>`;
 const SPARK = '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l1.9 5.6L19.5 9.5l-5.6 1.9L12 17l-1.9-5.6L4.5 9.5l5.6-1.9zM19 14l.9 2.6 2.6.9-2.6.9L19 21l-.9-2.6-2.6-.9 2.6-.9z"/></svg>';
 const GEAR = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>';
@@ -1337,6 +1351,7 @@ function bind(){
   on('[data-chore]','onclick',el=>openChore(null, el.dataset.chore));
   on('[data-chore-done]','onclick',el=>{ el.disabled = true; el.closest('.row,.todo')?.classList.add('doneanim'); setTimeout(() => choreDone(el.dataset.choreDone), reduceMotion ? 0 : 420); });
   on('.hero .hart','onclick',el=>pokeGuide(el));
+  on('.hero .hart','onkeydown',(el,e)=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); pokeGuide(el); } });
   on('#instGo','onclick',async()=>{ if(!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(()=>{}); installEvt = null; render(); });
   on('#instX','onclick',()=>{ installHidden = true; lsSet('hs-install-hidden', String(Date.now())); render(); });
   on('#modeBtn','onclick',el=>toggleSimplify(el.dataset.gid));
@@ -1397,7 +1412,7 @@ const pageBar = (back, backLabel, title, right) => `<div class="top"><button cla
 /* ================= profile ================= */
 function freeColorIdx(){ const used = Object.values(S.people).map(p=>p.color); for(let i=0;i<COLORS.length;i++) if(!used.includes(i)) return i; return hash(myUid)%COLORS.length; }
 function renderProfileSetup(){
-  let color = freeColorIdx(), char = 'rin';
+  let color = freeColorIdx(), char = Object.keys(ART)[0];
   app.innerHTML = `<section class="welcome"><div class="lineup">${lulu('happy','','luffy')}${lulu('happy','','hancock')}</div><p class="mut" style="margin:0;font-weight:600">Welcome to Split it</p><p class="big">Split anything with anyone</p>
     <p class="mut" style="margin:0">Housemates, trips, a dinner with a friend. ${LAPTOP?'Your sign-in':'Your Claude account'} is who you are here, so nobody else can add things as you.</p>
     ${canWrite?`<label class="f" for="nk">What should people call you? (optional)</label><input class="in" id="nk" placeholder="${esc(S.prof[myUid]?.name||'Your account name')}" maxlength="24" autocomplete="off">
@@ -1575,9 +1590,10 @@ function openFavEditor(){
 }
 
 /* ================= last time it cost ================= */
-function lastCost(title, exceptId){
+function lastCost(title, exceptId, moneyIn){
   const t = (title||'').trim().toLowerCase(); if(t.length < 3) return null;
-  const all = alive(S.expensesRaw).concat(alive(S.privEntries)).filter(e => e.kind!=='payment' && e._id!==exceptId && e.amount && e.status!=='needs_amount');
+  const all = alive(S.expensesRaw).concat(alive(S.privEntries)).filter(e => e.kind!=='payment' && e._id!==exceptId && e.amount && e.status!=='needs_amount' && (e.amount < 0) === !!moneyIn)
+    .map(e => e.amount < 0 ? {...e, amount: -e.amount} : e);
   const same = all.filter(e => (e.title||'').trim().toLowerCase() === t);
   const pool = same.length ? same : all.filter(e => (e.title||'').toLowerCase().split(' ')[0] === t.split(' ')[0] && t.split(' ')[0].length >= 4);
   if(!pool.length) return null;
@@ -1780,7 +1796,7 @@ function viewGroup(gid){
   const mems = activeIn(gid);
   h += `<div class="stackrow" style="margin:0 0 12px">${mems.map(m=>`<span class="chip" style="cursor:default">${av(m.id,'sm',gid)}<span class="ell" style="max-width:8em">${esc(m.id===myUid?'You':firstName(m.id))}</span></span>`).join('')}</div>`;
   h += `<section class="hero v2 sm ${v>0?'up':v<0?'down':'even'}${guideOf(myUid)!==null?' has-art':''}"><div class="htext"><p class="lbl">${v>0?'You’re owed':v<0?'You owe':'In this group'}</p><p class="num" data-count="${v}" data-ck="g:${esc(gid)}" data-fmt="big" data-zero="All square" style="${fitNum(v)}">${v===0?'All square':bigMoney(v)}</p></div>${guideOf(myUid)!==null?lulu(moodFor(v),'hart'):''}</section>`;
-  if(canWrite) h += `<div style="display:flex;gap:10px;margin-top:12px"><button class="btn primary" id="gAdd" data-gid="${esc(gid)}" style="flex:1">Add expense</button><button class="btn" id="gStats" data-gid="${esc(gid)}" style="flex:1">Stats</button><button class="btn mob-only" id="gJump" aria-label="Jump to expenses">${icon('ticket','tiny')} List</button></div>`;
+  if(canWrite) h += `<div style="display:flex;flex-wrap:wrap;gap:10px;margin-top:12px"><button class="btn primary" id="gAdd" data-gid="${esc(gid)}" style="flex:1">Add expense</button><button class="btn" id="gStats" data-gid="${esc(gid)}" style="flex:1">Stats</button><button class="btn mob-only" id="gJump" aria-label="Jump to expenses">${icon('ticket','tiny')} List</button></div>`;
   const np = nextPayer(gid);
   if(np) h += `<div class="ctxbar turnbar" style="margin-top:12px">${np.even ? `<span>${icon('star','tiny')}</span><span>Everyone’s about even. Anyone can pay next.</span>`
     : `${av(np.id,'sm',gid)}<span><b>${esc(np.id===myUid?'Your':firstName(np.id)+'’s')} turn to pay</b> <span class="mut">${np.id===myUid?'You’ve':'They’ve'} covered ${money(np.behind)} less than ${np.id===myUid?'your':'their'} share of everyday buys lately.</span></span>`}</div>`;
@@ -1793,11 +1809,11 @@ function viewGroup(gid){
     const sorted = plan.slice().sort((a,b)=> ((b.from===myUid||b.to===myUid)-(a.from===myUid||a.to===myUid)) || b.amount-a.amount);
     h += `<div class="card">` + sorted.map(p => { const mine = p.from===myUid || p.to===myUid, guestSide = isGuest(p.from) || isGuest(p.to);
       const txt = p.from===myUid ? `You pay ${esc(nameOf(p.to))}` : p.to===myUid ? `${esc(nameOf(p.from))} pays you` : `${esc(nameOf(p.from))} pays ${esc(nameOf(p.to))}`;
-      const canRecord = canWrite && (mine || (guestSide && (isGuest(p.from)?p.to:p.from)===myUid));
+      const waiting = !mine && waitingPay(gid, p), canRecord = canWrite && !waiting;
       const data = esc(JSON.stringify({...p, gid}));
-      return `<div class="settle${mine?' mine':''}"><div class="line">${av(p.from,'',gid)}<span class="arrow">→</span>${av(p.to,'',gid)}<div class="who"><div class="amt">${money(p.amount)}</div><div class="desc">${txt}</div></div></div>
-        ${canRecord?`<div class="acts"><button class="btn sm primary" data-pay='${data}'>${p.from===myUid?'I paid this':'I got this'}</button>${p.to===myUid?`<button class="btn sm" data-nudge='${data}'>Copy reminder</button>`:''}${p.from===myUid?etBtn(p.to):''}</div>`:''}</div>`; }).join('') + `</div>
-      <p class="note">${simp?`${plan.length} transfer${plan.length>1?'s':''} clear${plan.length>1?'':'s'} the group.`:'Each person pays back exactly who covered them.'} Only the two people in a transfer can record it.</p>`;
+      return `<div class="settle${mine?' mine':''}"><div class="line">${av(p.from,'',gid)}<span class="arrow">→</span>${av(p.to,'',gid)}<div class="who"><div class="amt">${money(p.amount)}</div><div class="desc">${txt}${waiting?` <span class="mut">· waiting for ${esc(firstName(p.to))} to confirm</span>`:''}</div></div></div>
+        ${canRecord?`<div class="acts"><button class="btn sm${mine||guestSide?' primary':''}" data-pay='${data}'>${p.from===myUid?'I paid this':p.to===myUid?'I got this':'Record it'}</button>${p.to===myUid?`<button class="btn sm" data-nudge='${data}'>Copy reminder</button>`:''}${p.from===myUid?etBtn(p.to):''}</div>`:''}</div>`; }).join('') + `</div>
+      <p class="note">${simp?`${plan.length} transfer${plan.length>1?'s':''} clear${plan.length>1?'':'s'} the group.`:'Each person pays back exactly who covered them.'} Saw someone pay? Anyone in the group can record it, and the person who got the money confirms.</p>`;
   }
   h += waitingNote(e => e.groupId===gid);
   h += wantedPoster(gid, plan);
@@ -2110,6 +2126,8 @@ function openGroupEditor(gid){
     };
   });
 }
+// a payment for this transfer is already recorded and waiting to be confirmed, so don't offer to record it twice
+const waitingPay = (gid, p) => groupEntries(gid).filter(e => e.kind==='payment' && e.confirmed===false && !e.deletedAt && e.from===p.from && e.to===p.to).reduce((t,e)=>t+e.amount,0) >= p.amount;
 function openMember(gid, id){
   const g = S.groups[gid], m = groupMembers(gid).find(x=>x.id===id); if(!m) return;
   const b = netOf(groupEntries(gid))[id]||0, guest = m.kind==='guest', isMe = id===myUid, creator = g.createdBy===myUid;
@@ -2117,6 +2135,8 @@ function openMember(gid, id){
   const accounts = activeIn(gid).filter(x=>x.kind==='account');
   const outsiders = Object.keys(S.people).filter(u => !groupMembers(gid).some(x=>x.id===u));
   let color = m.color||0;
+  // moving out: the transfers that clear their balance, and who can take over their bills
+  const moving = groupPlan(gid).filter(p => p.from===id || p.to===id), heirs = activeIn(gid).map(x=>x.id).filter(u => u!==id);
   openSheet(head(esc(nameOf(id))) + `<div class="pair">${av(id,'lg',gid)}<div><div style="font-weight:600">${isMe?'You':guest?'Not on the app':'On Split it'}${m.active===false?', moved out':''}</div>
       <div class="note" style="margin:2px 0 0">In ${esc(g.name)}: ${b?`<b class="${amtClass(b)}">${b>0?'is owed ':'owes '}${money(Math.abs(b))}</b>`:'settled'}</div></div></div>
     ${guest && canWrite?`<label class="f" for="pn">Name</label><input class="in" id="pn" maxlength="24" value="${esc(m.name||'')}">
@@ -2128,7 +2148,9 @@ function openMember(gid, id){
     ${canWrite?`<label class="f">${isMe?'Leave':'In the group'}</label>
       ${m.active===false ? `<button class="btn block" id="back">Bring ${esc(firstName(id))} back</button>`
        : `<button class="btn block" id="out" ${b||paysBills.length?'disabled':''}>${isMe?'Leave this group':`Move ${esc(firstName(id))} out`}</button>
-          <p class="note">${b?`Settle the ${money(Math.abs(b))} balance first.`:paysBills.length?`${isMe?'You pay':'They pay'} ${paysBills.map(r=>esc(r.title)).join(', ')}. Change who pays first.`:'History stays. They’re taken out of future bills.'}</p>`}`:''}
+          <p class="note">${b?`Settle the ${money(Math.abs(b))} balance first.`:paysBills.length?`${isMe?'You pay':'They pay'} ${paysBills.map(r=>esc(r.title)).join(', ')}. Change who pays first.`:'History stays. They’re taken out of future bills.'}</p>
+          ${b && moving.length ? `<div class="card">${moving.map(p => { const w = waitingPay(gid, p); return `<div class="row"><div class="body"><div class="t">${esc(youOr(p.from))} ${verb(p.from,'pay')} ${esc(youOrLower(p.to))} <b>${money(p.amount)}</b></div>${w?`<small class="mut">Waiting for ${esc(youOrLower(p.to))} to confirm</small>`:''}</div>${w ? '' : `<button class="btn sm" data-mpay='${esc(JSON.stringify({...p, gid}))}'>Record</button>`}</div>`; }).join('')}</div>` : ''}
+          ${!b && paysBills.length && heirs.length ? `<label class="f">Who pays ${paysBills.length>1?'these bills':esc(paysBills[0].title)} now?</label><div class="chips">${heirs.map(u=>`<button class="chip" data-heir="${esc(u)}">${av(u,'sm',gid)}${esc(youOr(u))}</button>`).join('')}</div>` : ''}`}`:''}
     ${guest && canWrite?`<div class="foot"><button class="btn" data-close>Close</button><button class="btn primary" id="sv">Save</button></div>`:''}`, sh => {
     sh.querySelectorAll('[data-col]').forEach(x => x.onclick = () => { color = Number(x.dataset.col); sh.querySelectorAll('[data-col]').forEach(y=>y.setAttribute('aria-pressed', y===x)); });
     const sv = sh.querySelector('#sv');
@@ -2138,6 +2160,11 @@ function openMember(gid, id){
     const out = sh.querySelector('#out');
     if(out) out.onclick = async () => {
       if(await write(()=>db.doc(`groups/${gid}/members/${id}`).update({active:false, leftAt:Date.now()}))){ closeSheet(); toast(isMe?'You left the group':firstName(id)+' moved out'); stripFromBills(gid, id); if(isMe) go('groups'); } };
+    sh.querySelectorAll('[data-mpay]').forEach(x => x.onclick = () => { const p = JSON.parse(x.dataset.mpay); confirmPay(p, {type:'group', id:gid}); });
+    sh.querySelectorAll('[data-heir]').forEach(x => x.onclick = async () => { const to = x.dataset.heir; let ok = true;
+      for(const r of paysBills) ok = ok && await write(()=>db.doc('recurring/'+r._id).update({paidBy:to}), true);
+      closeSheet(); toast(ok ? `${youOr(to)} ${to===myUid?'pay':'pays'} ${paysBills.length>1?'those bills':paysBills[0].title} now` : 'Some bills didn’t change. Try again');
+      if(ok) setTimeout(() => openMember(gid, id), 400); });
     const bk = sh.querySelector('#back');
     if(bk) bk.onclick = async () => { if(await write(()=>db.doc(`groups/${gid}/members/${id}`).update({active:true}))){ closeSheet(); toast('Back in'); } };
   });
@@ -2455,7 +2482,7 @@ function openExpense(opts={}){
     let catPicked = !!(src || bill || pre?.ai);
     sh.querySelectorAll('[data-cat]').forEach(b=>b.addEventListener('click',()=>{ catPicked = true; }));
     const showLast = () => { const el = $('#lastHint'); if(!el || st.repeat) { if(el) el.hidden = true; return; }
-      const lc = lastCost($('#ttl').value, ex?._id); if(!lc){ el.hidden = true; return; }
+      const lc = lastCost($('#ttl').value, ex?._id, st.refund); if(!lc){ el.hidden = true; return; }
       const cur = toCents($('#amt').value), diff = cur && lc.last.amount ? Math.round((cur - lc.last.amount) / lc.last.amount * 100) : 0;
       el.hidden = false;
       el.innerHTML = `Last time: <b>${money(lc.last.amount)}</b> on ${esc(dayLabel(lc.last.date))}${lc.avg?`, usually about ${money(lc.avg)}`:''}.`
@@ -2521,7 +2548,10 @@ function openExpense(opts={}){
         const data = { groupId:ctx.id, title, amount:st.variable?0:a, variable:st.variable, paidBy:st.paidBy, category:st.cat, splitMode:st.mode, splitInput:inp, day:Number(date.slice(8,10)), every:st.every, month:Number(date.slice(5,7)) };
         if(st.every==='week') data.startDate = date;
         if(bill){ const changedEvery = (bill.every||'month') !== st.every;
-          done = await write(() => db.doc('recurring/'+bill._id).update({...data, ...(changedEvery || st.every==='week' ? {startMonth:date.slice(0,7), startDate:date, lastPosted:null} : {}), mode:null, weights:null, exact:null, editedBy:myUid})); msg='Bill updated'; }
+          // moved the next due date past the next period (say Dec 1 to Jan 1): skip the periods in between
+          const skip = {}; if(!changedEvery && st.every!=='week'){ const k = st.every==='year' ? date.slice(0,4) : date.slice(0,7), nk = nextDue(bill).key;
+            if(nk && k > nk) skip.lastPosted = st.every==='year' ? String(+k-1) : prevYm(k); }
+          done = await write(() => db.doc('recurring/'+bill._id).update({...data, ...skip, ...(changedEvery || st.every==='week' ? {startMonth:date.slice(0,7), startDate:date, lastPosted:null} : {}), mode:null, weights:null, exact:null, editedBy:myUid})); msg='Bill updated'; }
         else { done = await write(() => db.collection('recurring').doc(newId('r')).set({...data, startMonth:date.slice(0,7), lastPosted:null, paused:false, createdAt:Date.now(), addedBy:myUid})); msg='Bill added'; }
       } else {
         const id = ex ? ex._id : newId('e');
@@ -2620,12 +2650,12 @@ async function recordPayment(ctx, from, to, amount, extra={}){
   return write(()=>db.doc('expenses/'+id).set({...data, groupId: ctx.type==='group' ? ctx.id : null}));
 }
 function confirmPay(p, ctx){
-  if(p.from!==myUid && p.to!==myUid && !(isGuest(p.from)||isGuest(p.to))) return;
-  const other = p.from===myUid ? p.to : p.from;
-  openSheet(head(p.from===myUid?'I paid this':'I got paid') + `<div class="pair">${av(p.from,'lg')}<span class="mut">→</span>${av(p.to,'lg')}</div>
+  if(!canWrite) return;
+  const mine = p.from===myUid || p.to===myUid, other = p.from===myUid ? p.to : p.from;
+  openSheet(head(p.from===myUid?'I paid this':p.to===myUid?'I got paid':'Record a payment') + `<div class="pair">${av(p.from,'lg')}<span class="mut">→</span>${av(p.to,'lg')}</div>
     <p class="note" style="font-size:.95rem;margin:0">${esc(youOr(p.from))} paid ${esc(youOrLower(p.to))}, ${esc(ctxTitle(ctx))}</p>
     <label class="f" for="pa">Amount</label><div class="amount-wrap"><span>$</span><input id="pa" inputmode="decimal" value="${(p.amount/100).toFixed(2)}"></div>
-    <p class="note" id="pn">${p.to===myUid||isGuest(other)?'Recorded straight away.':`${esc(firstName(p.to))} gets a quick “did you get it?” to confirm.`} Change the amount if only part was paid.</p>
+    <p class="note" id="pn">${p.to===myUid||(mine&&isGuest(other))||isGuest(p.to)?'Recorded straight away.':`${esc(firstName(p.to))} gets a quick “did you get it?” to confirm.`} Change the amount if only part was paid.</p>
     ${p.from===myUid?etBox(p.to):''}
     <div class="payrow"><div><label class="f" for="pd">When</label><input class="in" id="pd" type="date" value="${today()}" max="${today()}"></div>
       <div><label class="f" for="pnote">Note (optional)</label><input class="in" id="pnote" maxlength="80" placeholder="e-Transfer ref, cash…" autocomplete="off"></div></div>
@@ -2636,7 +2666,9 @@ function confirmPay(p, ctx){
       pn.textContent = a > p.amount ? `That’s ${money(a-p.amount)} more than owed, so ${youOrLower(p.to)} would then owe it back.` : base; };
     ok.onclick = async () => { const a = toCents(pa.value); if(!a) return; ok.disabled = true;
       const before = myTotals().net;
-      if(await recordPayment(ctx, p.from, p.to, a, {date:sh.querySelector('#pd').value, note:sh.querySelector('#pnote').value})){ closeSheet(); celebrate(a>=p.amount ? 'Paid up! Yatta!' : 'Payment saved!', a>=p.amount && before === (p.from===myUid ? -p.amount : p.amount)); } else ok.disabled = false; };
+      if(await recordPayment(ctx, p.from, p.to, a, {date:sh.querySelector('#pd').value, note:sh.querySelector('#pnote').value})){ closeSheet();
+        if(!mine) return toast(p.to!==myUid && !isGuest(p.to) ? `Saved. ${firstName(p.to)} gets asked to confirm` : 'Payment saved');
+        celebrate(a>=p.amount ? 'Paid up! Yatta!' : 'Payment saved!', a>=p.amount && before === (p.from===myUid ? -p.amount : p.amount)); } else ok.disabled = false; };
   });
 }
 function openFriendSettle(fid){
@@ -2683,13 +2715,13 @@ function openBill(id){
   const r = S.recurringRaw.find(x=>x._id===id); if(!r) return;
   const d = nextDue(r), posted = alive(S.expensesRaw).filter(e=>e.recurringId===id).length;
   const sp = r.variable ? null : billSplit(r, r.amount, 'x');
-  const rule = r.splitMode==='shares' ? 'by shares' : r.splitMode==='exact' ? 'by set amounts' : 'equally';
+  const rule = r.splitMode==='shares' ? 'by shares' : r.splitMode==='exact' ? 'by set amounts' : r.splitMode==='pct' ? 'by percentage' : r.splitMode==='items' ? 'by items' : 'equally';
   const people = sp ? Object.entries(sp) : Object.keys(billSplit(r,100000,'x')).map(k=>[k,null]);
   openSheet(head(`${catIcon(r.category)} ${esc(r.title)}`) + `
     <p class="detail-amt">${r.variable?'Varies':money(r.amount)}</p>
     <p class="note" style="margin:6px 0 0">${esc(ctxTitle({type:'group',id:r.groupId}))}. ${billWhen(r)}. ${esc(youOr(r.paidBy))} ${verb(r.paidBy,'pay')} it, split ${rule}.${r.paused?' Paused.':` Next: ${d.date.toLocaleDateString('en-CA',{month:'long',day:'numeric'})}.`} Added ${posted} time${posted===1?'':'s'} so far.</p>
     ${r.variable?`<p class="banner" style="margin:12px 0 0">The amount changes, so on the due day it shows under Needs you for someone to fill in.</p>`:''}
-    <div class="split">${people.map(([mid,c])=>`<div class="srow">${av(mid,'sm')}<span class="nm">${esc(youOr(mid))}</span><span class="share">${c==null?(r.splitMode==='shares'?r.splitInput.shares[mid]+' sh':'equal'):money(c)}</span></div>`).join('')}</div>
+    <div class="split">${people.map(([mid,c])=>`<div class="srow">${av(mid,'sm')}<span class="nm">${esc(youOr(mid))}</span><span class="share">${c==null?(r.splitMode==='shares'?r.splitInput.shares[mid]+' sh':r.splitMode==='pct'?(r.splitInput.pct?.[mid]||0)+'%':'equal'):money(c)}</span></div>`).join('')}</div>
     ${canWrite?`<p class="note">Edits apply from the next time it’s added. To change one month, edit that entry.</p>
     <div class="foot"><button class="btn" id="pz">${r.paused?'Resume':'Pause'}</button><button class="btn" id="ed">Edit</button><button class="btn danger" id="dl">Delete</button></div>`:''}`, sh => {
     if(!canWrite) return;
@@ -2706,7 +2738,7 @@ function openBill(id){
 function fillAmount(id){
   const e = alive(S.expensesRaw).find(x=>x._id===id); if(!e) return;
   const r = S.recurringRaw.find(x=>x._id===e.recurringId);
-  const mode = r?.splitMode || e.splitMode, input = r?.splitInput || e.splitInput;
+  const mode = e.splitMode || r?.splitMode, input = e.splitInput || r?.splitInput;   // the split it was posted with
   openSheet(head(`${catIcon(e.category)} ${esc(e.title)}`) + `
     <p class="note" style="margin:0">The ${r?.every==='week'?'bill for '+dayLabel(e.date):r?.every==='year'?e.date.slice(0,4)+' bill':monthName(e.date.slice(0,7))+' bill'}, ${esc(ctxLabel(e))}. ${esc(youOr(e.paidBy))} ${verb(e.paidBy,'pay')} it.</p>
     <label class="f" for="fa">Amount on the bill</label><div class="amount-wrap"><span>$</span><input id="fa" inputmode="decimal" placeholder="0.00" autocomplete="off"></div>
@@ -2736,7 +2768,8 @@ const setRange = n => { try{ localStorage.setItem('hs-range', String(n)); }catch
 // Monthly bars, stacked by series, with a dashed line for the average of full months.
 function monthBars(months, series, valOf, label){
   const n = months.length, W = 320, H = 150, top = 22, gap = n > 6 ? 6 : 14, bw = (W - gap*(n-1)) / n;
-  const vals = months.map(valOf), tots = vals.map(v => series.reduce((s,x)=>s+(v[x.key]||0),0));
+  // a month where refunds beat spending shows as zero, not a bar below the line
+  const vals = months.map(m => { const v = {...valOf(m)}; for(const k in v) v[k] = Math.max(0, v[k]); return v; }), tots = vals.map(v => series.reduce((s,x)=>s+(v[x.key]||0),0));
   const max = Math.max(1,...tots), Y = v => H - v/max*(H-top);
   const full = tots.slice(0,-1).filter(t=>t), avg = full.length >= 2 ? Math.round(full.reduce((a,b)=>a+b,0)/full.length) : 0;
   const maxI = tots.indexOf(Math.max(...tots));
@@ -2794,7 +2827,7 @@ function paceData(entriesIn){
 }
 function paceSvg(p){
   const W = 320, H = 120, top = 12, max = Math.max(1, p.total, p.lastTotal, p.proj||0);
-  const X = d => d/31*W, Y = v => H - v/max*(H-top);
+  const X = d => d/31*W, Y = v => H - Math.max(0, v)/max*(H-top);
   const path = arr => arr.map((v,d)=>`${d?'L':'M'}${X(d).toFixed(1)} ${Y(v).toFixed(1)}`).join('');
   let s = `<svg viewBox="0 0 ${W} ${H+20}" role="img" aria-label="Spending so far this month compared with last month"><line class="base" x1="0" x2="${W}" y1="${H+.5}" y2="${H+.5}"/>`;
   s += `<path class="ln prev" d="${path(p.b)}"/>`;
@@ -2829,6 +2862,7 @@ const paceRead = p => x => { const d = Math.round(x*31); if(d < 1) return null;
 
 // One whole split into a few parts: a single segmented bar, coloured by category.
 function catStrip(cats){
+  cats = posCats(cats);
   const tot = sumOf(cats); if(!tot) return { html:'', shown:new Set() };
   const rows = Object.entries(cats).sort((a,b)=>b[1]-a[1]), shown = new Set(); let other = 0;
   const segs = [];
@@ -2837,8 +2871,9 @@ function catStrip(cats){
   return { shown, html: `<div class="catstrip" role="img" aria-label="${esc(segs.map(([c,v])=>`${c==='_other'?'Other':catOf(c)[2]} ${Math.round(v/tot*100)}%`).join(', '))}">${segs.map(([c,v],i)=>
     `<i style="flex-grow:${v};background:${c==='_other'?'var(--s0)':catColor(c)};--d:${i*70}ms"></i>`).join('')}</div>` };
 }
-const catRows = (cats, tot, shown) => Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([c,v])=>{ const [,icn,lab] = catOf(c), col = shown.has(c) ? catColor(c) : 'var(--s0)';
-  return `<div class="row"><span class="ic">${icon(icn)}</span><div class="body"><div class="t"><i class="sw" style="background:${col}"></i>${lab}</div><div class="bar"><i style="background:${col};width:${v/tot*100}%"></i></div></div><div class="r"><b>${money(v)}</b><small class="mut">${Math.round(v/tot*100)}%</small></div></div>`; }).join('');
+const posCats = cats => Object.fromEntries(Object.entries(cats).filter(([,v]) => v > 0));
+const catRows = (cats, tot, shown) => (cats = posCats(cats), tot = sumOf(cats) || 1, Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([c,v])=>{ const [,icn,lab] = catOf(c), col = shown.has(c) ? catColor(c) : 'var(--s0)';
+  return `<div class="row"><span class="ic">${icon(icn)}</span><div class="body"><div class="t"><i class="sw" style="background:${col}"></i>${lab}</div><div class="bar"><i style="background:${col};width:${v/tot*100}%"></i></div></div><div class="r"><b>${money(v)}</b><small class="mut">${Math.round(v/tot*100)}%</small></div></div>`; }).join(''));
 
 // A little trend line for a tile.
 function sparkline(vals){
@@ -3252,8 +3287,9 @@ async function quickAdd(text){
   if(!text){ app.querySelector('#quickIn')?.focus(); return; }
   const done = () => { const qi = app.querySelector('#quickIn'); if(qi) qi.value='';
     const h = app.querySelector('#qhintT'); if(h) h.textContent = QHINT; };
+  const refund = /\b(refund(ed)?|got\b.*\bback|sold|deposit back|money back|reimburs\w*)\b/i.test(text);
   const go = d => { const {ctx, prefill} = cleanAi(d); done();
-    if(ctx) openExpense({ctx, prefill}); else pickContext(c => openExpense({ctx:c, prefill}), 'Who’s it with?'); };
+    if(ctx) openExpense({ctx, prefill, refund}); else pickContext(c => openExpense({ctx:c, prefill, refund}), 'Who’s it with?'); };
   // Read it on the device first. Only ask the AI (if it's set up) when that can't find an amount.
   let local = null; try{ local = localParse(text); }catch(e){ console.error(e); }
   if(local && (local.amount || !sample)) return go(local);
