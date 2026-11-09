@@ -1,26 +1,44 @@
 # What's new in Split it
 
-## 2.1 (November 2026)
+## v2.1.0 · November 9, 2026
 
-**Safer**
-- Groups are private: people only see the groups they're in, and expenses they're part of. A friend you split one dinner with no longer sees the house.
-- A damaged data file (say the laptop lost power mid-save) no longer starts an empty house. Split it restores the newest backup, or refuses to start so nothing gets overwritten.
-- Changes made offline wait if your sign-in expired, and new changes queue behind them so everything arrives in order.
-- Emails with sign-in and reset links only go out once `PUBLIC_URL` is set.
-- A phone with an old copy can't overwrite a bill amount someone already filled in. New bills due today post right away.
-- Reminders don't nag you about a payment you've marked paid that's waiting to be confirmed.
+**Safer by default, plus money coming in.** Groups are now private to the people in them, your data survives a bad shutdown, and you can record refunds and deposits coming back.
 
-**New**
-- Money coming in: refunds, a deposit back or something sold. It comes off everyone's share.
-- Payments get a date (for ones you record late) and a note, like an e-Transfer reference.
-- The phone's Back button closes the open sheet, then goes back a page, instead of closing the app.
-- A number on the Home tab, and on the app icon where the phone supports it, for things that need you.
+### Highlights
+- **Private groups.** You only see the groups you're in and the expenses you're part of. A friend you split one dinner with no longer sees the house.
+- **Money coming in.** Record a refund, a deposit back or something you sold. It comes off everyone's share.
+- **Payment notes.** Payments get a date (for ones you record late) and a note, like an e-Transfer reference.
+
+### New
+- Money coming in: a toggle on any expense for refunds, deposits back and things sold.
+- Payment date and note. The note shows in the list, the details and the "Did you get it?" prompt.
+- A number on the Home tab, and on the app icon where the phone supports it, for things waiting on you.
 - Search finds amounts: "54" or "54.20".
-- Editing an expense someone else just changed warns you before you overwrite their change.
-- Your guide shows up on empty screens, cheers when your payment gets confirmed, when you clear everything that needs you, and at 7, 30 and 100 days even. A coin hops across when you pay.
+- Your guide shows up on empty screens, cheers when your payment is confirmed, when you clear everything that needs you, and at 7, 30 and 100 days even. A coin hops across when you pay.
+
+### Improved
+- The phone's Back button closes the open sheet, then goes back a page, instead of closing the app (laptop app).
+- New bills due today show up right away instead of within 10 minutes.
 - Weekly and yearly bills say "this week's" or "this year's" amount.
 
-## 2.0 (November 2026)
+### Fixed
+- Editing an expense someone else just changed now warns you before you overwrite their change.
+- A phone with an old copy can no longer overwrite a bill amount someone already filled in.
+- Reminders don't nag you about a payment you've marked paid that is waiting to be confirmed.
+- Two comments at the same time no longer throw off the comment count.
+
+### Security
+- Group privacy is enforced by the laptop server, for reading, changing and live updates.
+- A damaged data file (say the laptop lost power mid-save) no longer starts an empty house. Split it restores the newest backup, or refuses to start so nothing is overwritten. Saves are flushed to disk first.
+- Changes made offline are kept if your sign-in expired, and new changes wait behind them so everything arrives in order.
+- Emails with sign-in and reset links only go out once `PUBLIC_URL` is set.
+
+### Known issues
+- The Back button, private groups and the damaged-file restore only apply to the laptop app, not the Claude artifact preview.
+- "Money coming in" can make a month's spending total negative when a refund is bigger than that month's spending.
+- Houses past about 1,000 expenses still download the full history on each open. A faster path is planned.
+
+## v2.0.0 · November 7, 2026
 
 **Faster**
 - The page is a third of the size and the laptop sends it compressed. Opening it on a phone is noticeably quicker, and repeat opens use what the phone already has.
