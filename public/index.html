@@ -1114,6 +1114,7 @@ async function write(fn, quiet){
   try{ await fn(); return true; }
   catch(e){
     if(e?.code==='invalid_argument'){ if(!quiet) toast('You don’t have permission to change that'); }
+    else if(e?.code==='failed_precondition'){ if(!quiet) toast(e.message || 'That can’t be saved as it is'); }
     else if(e?.code==='unavailable'){ await new Promise(r=>setTimeout(r,600+Math.random()*600)); try{ await fn(); return true; }catch(_){ if(!quiet) toast('Couldn’t save. Check your connection'); } }
     else if(e?.code==='quota_exceeded'){ if(!quiet) toast('Storage is full. Delete old entries to make room'); }
     else if(!quiet) toast('Couldn’t save. Try again');
@@ -1319,6 +1320,9 @@ function bind(){
   on('[data-bill]','onclick',el=>openBill(el.dataset.bill));
   on('[data-fill]','onclick',el=>fillAmount(el.dataset.fill));
   on('[data-confirm]','onclick',el=>confirmReceived(el.dataset.confirm, el.dataset.ok==='1'));
+  on('#newsOk','onclick',()=>{ try{ localStorage.setItem('hs.news', NEWS.v); }catch(e){} render(); });
+  on('#confirmAll','onclick',async el=>{ if(!confirmTap(el, 'Tap again to confirm all')) return; const ids = el.dataset.ids.split(',').filter(id => alive(S.expensesRaw).some(x=>x._id===id && x.to===myUid && x.confirmed===false));
+    if(await write(async()=>{ for(const id of ids) await db.doc('expenses/'+id).update({confirmed:true}); })) celebrate('Money received!'); });
   on('[data-pay]','onclick',el=>{ const p = JSON.parse(el.dataset.pay); confirmPay(p, {type:'group', id:p.gid}); });
   on('[data-nudge]','onclick',el=>nudge(JSON.parse(el.dataset.nudge)));
   on('[data-et]','onclick',el=>copy(el.dataset.et, 'e‑Transfer address copied'));
@@ -1469,7 +1473,8 @@ async function drawAccount(box){
     ? `<div class="row"><div class="body"><div class="t">Google</div><div class="m ell">Connected${a.googleEmail?` · ${esc(a.googleEmail)}`:''}</div></div><button class="btn sm" id="acGoogleOff">Disconnect</button></div>`
     : `<div class="row"><div class="body"><div class="t">Google</div><div class="m">Sign in with one tap.</div></div><a class="btn sm" href="/auth/google?mode=link">Connect</a></div>`;
   const pwRow = `<div class="row"><div class="body"><div class="t">Password</div><div class="m">${a.hasPassword?'Set':'Not set. You sign in with Google or email'}</div></div><button class="btn sm" id="acPw">${a.hasPassword?'Change':'Set one'}</button></div>`;
-  box.innerHTML = `<div class="card">${emailRow}${googleRow}${pwRow}</div><div id="acForm"></div>
+  const codeRow = `<div class="row"><div class="body"><div class="t">Sign-in code</div><div class="m">${a.code?`On · ${a.backupCodes} backup code${a.backupCodes===1?'':'s'} left`:'Off. A second step from an authenticator app.'}</div></div><button class="btn sm" id="acCode">${a.code?'Turn off':'Turn on'}</button></div>`;
+  box.innerHTML = `<div class="card">${emailRow}${googleRow}${pwRow}${codeRow}</div><div id="acForm"></div>
     <button class="btn block" id="acOut" style="margin-top:10px">Sign out on all devices</button>`;
   const form = box.querySelector('#acForm');
   const ask = (html, go) => { form.innerHTML = `<div class="card" style="padding:12px 14px;margin-top:10px">${html}<p class="note" id="acErr" role="alert"></p></div>`;
@@ -1488,6 +1493,29 @@ async function drawAccount(box){
       <p class="note">At least 8 characters. You stay signed in here; other phones get signed out.</p>
       <div class="foot" style="position:static;padding:10px 0 0"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-go>Save password</button></div>`,
     async () => { await api('/api/account/password', { current: form.querySelector('#acC')?.value || '', next: form.querySelector('#acN').value }); toast('Password saved'); drawAccount(box); });
+  // Sign-in code: a 6-digit code from an authenticator app, asked for after the password.
+  const showBackup = codes => { form.innerHTML = `<div class="card" style="padding:12px 14px;margin-top:10px"><div class="t" style="font-weight:800">Sign-in code is on</div>
+      <p class="note" style="margin:6px 0 8px">Keep these backup codes somewhere safe. Each one works once if you lose your phone.</p>
+      <div style="font-family:ui-monospace,monospace;display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:.95rem">${codes.map(c=>`<span>${esc(c)}</span>`).join('')}</div>
+      <div class="foot" style="position:static;padding:12px 0 0"><button class="btn" id="acCopyB">Copy</button><button class="btn primary" id="acDoneB">I saved them</button></div></div>`;
+    form.querySelector('#acCopyB').onclick = async () => { try{ await navigator.clipboard.writeText(codes.join('\n')); toast('Backup codes copied'); }catch(e){ toast('Couldn’t copy. Write them down'); } };
+    form.querySelector('#acDoneB').onclick = () => drawAccount(box); };
+  box.querySelector('#acCode').onclick = async () => {
+    if(a.code) return ask(`<label class="f" for="acK" style="margin-top:0">Code from your app, or a backup code</label><input class="in" id="acK" inputmode="numeric" autocomplete="one-time-code" autocapitalize="off">
+        <p class="note">After this, your password alone signs you in.</p>
+        <div class="foot" style="position:static;padding:10px 0 0"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-go>Turn off</button></div>`,
+      async () => { await api('/api/account/code/off', { code: form.querySelector('#acK').value }); toast('Sign-in code turned off'); drawAccount(box); });
+    let st; try{ st = await api('/api/account/code/start', {}); }catch(x){ toast(x.message); return; }
+    ask(`<p class="note" style="margin:0 0 8px"><b>1.</b> Add Split it to an authenticator app (Google Authenticator, 1Password, Apple Passwords). On this phone, tap the button. On another device, type the key in.</p>
+        <a class="btn block" href="${esc(st.uri)}">Open my authenticator app</a>
+        <div class="row" style="padding:10px 0 0"><div class="body"><div class="m">Key</div><div class="t" style="font-family:ui-monospace,monospace;font-size:.85rem;word-break:break-all">${esc(st.secret.replace(/(.{4})/g,'$1 ').trim())}</div></div><button class="btn sm" id="acKeyCopy" type="button">Copy</button></div>
+        <label class="f" for="acK"><b>2.</b> The 6-digit code it shows</label><input class="in" id="acK" inputmode="numeric" autocomplete="one-time-code" maxlength="7">
+        <div class="foot" style="position:static;padding:10px 0 0"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-go>Turn on</button></div>`,
+      async () => { const r = await api('/api/account/code/confirm', { code: form.querySelector('#acK').value }); toast('Sign-in code is on');
+        const btn = box.querySelector('#acCode'); if(btn){ btn.hidden = true; const m = btn.parentElement.querySelector('.m'); if(m) m.textContent = `On · ${r.backup.length} backup codes left`; }
+        showBackup(r.backup); });
+    const kc = form.querySelector('#acKeyCopy'); if(kc) kc.onclick = async () => { try{ await navigator.clipboard.writeText(st.secret); toast('Key copied'); }catch(e){ toast('Couldn’t copy. Type it in'); } };
+  };
   box.querySelector('#acOut').onclick = async e => { if(!confirmTap(e.currentTarget, 'Tap again to sign out everywhere')) return;
     try{ await api('/api/account/signout-all', {}); location.href = '/login'; }catch(x){ toast(x.message); } };
 }
@@ -1663,6 +1691,7 @@ function openChore(gid, id){
     <label class="f">Who takes turns (in this order)</label><div class="split" id="chO"></div>
     <label class="f" for="chD">${c?'Next due':'First due'}</label><input class="in" id="chD" type="date" value="${esc(c?.due || today())}">
     ${c?`<label class="f">Whose turn now</label><div class="chips" id="chW"></div>`:''}
+    ${c && st.order.length>1 && canWrite?`<label class="f">Can’t do this one?</label><div class="chips" id="chX"></div><p class="note">Swap with someone: they take this turn and you take theirs. ${LAPTOP?'They get a notification.':''}</p>`:''}
     <p class="note">${LAPTOP?'The person whose turn it is gets a phone notification on the due day. ':''}Tapping Done passes it to the next person.</p>
     <div class="foot">${c?'<button class="btn danger" id="chDel">Delete</button>':'<button class="btn" data-close>Cancel</button>'}<button class="btn primary" id="chS">Save</button></div>`, sh => {
     const $ = q => sh.querySelector(q); let turnId = c ? choreWho(c) : null;
@@ -1677,6 +1706,11 @@ function openChore(gid, id){
     };
     sh.querySelectorAll('[data-ev]').forEach(b => b.onclick = () => { st.every = +b.dataset.ev; drawEv(); });
     drawEv(); drawO();
+    if($('#chX')){ const now = choreWho(c);   // swap = the two trade places in the order, so each still does one per round
+      $('#chX').innerHTML = (c.order||[]).filter(x => x!==now && mem.some(m=>m.id===x)).map(x=>`<button class="chip" data-sw="${esc(x)}">${av(x,'sm',gid)}Swap with ${esc(x===myUid?'me':firstName(x))}</button>`).join('');
+      $('#chX').querySelectorAll('[data-sw]').forEach(b => b.onclick = async () => { const other = b.dataset.sw, order = [...c.order], i = order.indexOf(now), j = order.indexOf(other); if(i<0||j<0) return;
+        [order[i], order[j]] = [order[j], order[i]];
+        if(await write(()=>db.doc('chores/'+id).update({order, swap:{by:myUid, from:now, to:other, at:Date.now()}}))){ closeSheet(); toast(`Swapped. ${other===myUid?'This one is yours':firstName(other)+' takes this one'}, ${now===myUid?'you take':firstName(now)+' takes'} ${other===myUid?'your':firstName(other)+'’s'} turn.`); } }); }
     if($('#chDel')) $('#chDel').onclick = async () => { if(await write(()=>db.doc('chores/'+id).delete())){ closeSheet(); toast('Chore deleted', {label:'Undo', fn:()=>write(()=>db.doc('chores/'+id).set(Object.fromEntries(Object.entries(c).filter(([k])=>k!=='_id'))))}); } };
     $('#chS').onclick = async () => {
       const title = $('#chT').value.trim().slice(0,40); if(!title){ toast('Name the chore'); return; }
@@ -1691,6 +1725,21 @@ function openChore(gid, id){
 }
 
 /* ================= HOME ================= */
+/* What's new, shown once per version on the laptop app. Keep it to three lines people will care about. */
+const NEWS = { v:'2.2.0', lines:[
+  ['Sign-in code', 'Add a second step from an authenticator app. It’s in your profile under Signing in.'],
+  ['Two people paid', 'Splitting a bill two of you paid? Tap “Two people paid” on a new expense.'],
+  ['Trips and chores', 'Give a group a trip currency, and swap a chore turn with one tap.'] ] };
+const newsSeen = () => { try{ return localStorage.getItem('hs.news'); }catch(e){ return NEWS.v; } };
+function newsCard(){
+  if(!LAPTOP) return '';
+  const seen = newsSeen();
+  // someone brand new has nothing to compare it to: start them at this version, quietly
+  if(!seen){ try{ if(Date.now() - (S.people[myUid]?.joinedAt||0) < 864e5){ localStorage.setItem('hs.news', NEWS.v); return ''; } }catch(e){ return ''; } }
+  if(seen === NEWS.v) return '';
+  return `<div class="banner" id="newsCard" style="margin-top:14px"><b>What’s new in v${NEWS.v}</b>${NEWS.lines.map(([t,d])=>`<div style="margin-top:6px"><b>${esc(t)}.</b> ${esc(d)}</div>`).join('')}
+    <div style="display:flex;gap:10px;align-items:center;margin-top:10px"><button class="btn sm primary" id="newsOk">Got it</button><a href="https://github.com/sherrypanaich/split-it/releases" target="_blank" rel="noopener" style="color:inherit;font-weight:700">Everything that changed</a></div></div>`;
+}
 function viewHome(){
   const t = myTotals(), cur = ymOf(new Date());
   const bg = colorOf(myUid), fg = inkOn(bg);
@@ -1702,6 +1751,7 @@ function viewHome(){
     <p class="num" data-count="${t.net}" data-ck="home" data-fmt="big" data-zero="All square" style="${fitNum(t.net)}">${t.net===0?'All square':bigMoney(t.net)}</p>
     <p class="hline">${t.net>0?(t.net>EVEN_ENOUGH?'Go collect. That’s theirs to fix.':'Time to collect.'):t.net<0?'Settle up when you can.':streakLine()}</p></div>
     ${showArt?lulu(moodFor(t.net),'hart'):''}</section>`;
+  h += newsCard();
   if(canWrite){
     h += `<div class="quick"><label for="quickIn" class="sr">Quick add</label>
       <input id="quickIn" placeholder="lunch with Aman 24.50" autocomplete="off" enterkeyhint="go">
@@ -1761,7 +1811,12 @@ function needsYou(gid){
   myChores(gid).forEach(c => out.push(`<div class="todo"><div class="line"><span class="ic">${icon('household')}</span><div class="body"><div class="t">Your turn: ${esc(c.title)}</div>
       <div class="m">${choreWhen(c.due)}${gid?'':', '+esc(S.groups[c.groupId]?.name||'')}</div></div></div>
       ${canWrite?`<div class="acts"><button class="btn sm primary" data-chore-done="${esc(c._id)}">Done</button></div>`:''}</div>`));
-  alive(S.expensesRaw).filter(e=>e.kind==='payment' && e.to===myUid && e.confirmed===false && (!gid || e.groupId===gid)).forEach(e => out.push(`<div class="todo"><div class="line">${av(e.from)}<div class="body">
+  const toConfirm = alive(S.expensesRaw).filter(e=>e.kind==='payment' && e.to===myUid && e.confirmed===false && (!gid || e.groupId===gid));
+  // several waiting at once (after an import, say): one tap for the lot
+  if(toConfirm.length >= 3 && canWrite) out.push(`<div class="todo"><div class="line"><span class="ic">${icon('coin')}</span><div class="body"><div class="t">${toConfirm.length} payments are waiting for you</div>
+      <div class="m">${money(toConfirm.reduce((t,e)=>t+e.amount,0))} in all. Confirm them one by one below, or all together if you got every one.</div></div></div>
+      <div class="acts"><button class="btn sm primary" id="confirmAll" data-ids="${esc(toConfirm.map(e=>e._id).join(','))}">Yes, got them all</button></div></div>`);
+  toConfirm.forEach(e => out.push(`<div class="todo"><div class="line">${av(e.from)}<div class="body">
       <div class="t">Did you get ${money(e.amount)} from ${esc(nameOf(e.from))}?</div><div class="m">${esc(ctxLabel(e))}. ${esc(nameOf(e.addedBy||e.from))} marked it paid ${whenLabel(e.createdAt)}.${e.note?' “'+esc(e.note)+'”':''}</div></div></div>
       ${canWrite?`<div class="acts"><button class="btn sm primary" data-confirm="${esc(e._id)}" data-ok="1">Yes, got it</button><button class="btn sm" data-confirm="${esc(e._id)}" data-ok="0">No</button></div>`:''}</div>`));
   alive(S.expensesRaw).filter(e => unreadOn(e) && e.people.includes(myUid) && (!gid || e.groupId===gid)).sort(byDate).slice(0,3).forEach(e => out.push(`<div class="todo"><div class="line"><span class="ic">${icon('bubble')}</span><div class="body">
@@ -2076,6 +2131,9 @@ function openGroupEditor(gid){
       <label class="f">Monthly budgets (optional)</label>
       <div class="split">${['groceries','food','household','drinks','transport','fun','other'].map(c=>`<div class="srow"><span class="nm">${catIcon(c)} ${catOf(c)[2]}</span><span class="amount-wrap" style="padding:0 8px;min-width:7em"><span>$</span><input inputmode="numeric" data-bud="${c}" placeholder="—" value="${g.budgets?.[c]?Math.round(g.budgets[c]/100):''}" aria-label="${catOf(c)[2]} budget" style="width:4.5em;border:0;background:none;text-align:right"></span></div>`).join('')}</div>
       <p class="note">A quiet nudge at 80% and again when it’s used up. Leave blank for no budget.</p>
+      <label class="f" for="gcur">Currency you mostly pay in</label>
+      <select class="in" id="gcur">${CURRENCIES.map(c=>`<option ${c===(g.cur||'CAD')?'selected':''}>${c}</option>`).join('')}</select>
+      <p class="note">For a trip abroad. New expenses here start in that currency and are turned into CAD at the day’s rate, so balances stay in CAD. You can still change it on any expense.</p>
       <label class="toggle"><input type="checkbox" id="arch" ${g.archived?'checked':''}><span><b>Archive this group</b><small>Hides it from Home. Balances still count.</small></span></label>
       ${downloads?`<button class="btn block" id="gx" style="margin-top:12px">Export to a spreadsheet</button>`:''}
       <button class="btn block" id="gImport" style="margin-top:8px">Import from Splitwise (CSV)</button>
@@ -2109,7 +2167,7 @@ function openGroupEditor(gid){
           const byShares = sh.querySelector('[data-ds="shares"]').getAttribute('aria-pressed')==='true', shares = {};
           sh.querySelectorAll('[data-dsw]').forEach(i => { const v = Math.max(0, Math.round(+i.value||0)); if(v) shares[i.dataset.dsw] = v; });
           const budgets = {}; sh.querySelectorAll('[data-bud]').forEach(i => { const v = Math.round((parseFloat(i.value)||0)*100); if(v>0) budgets[i.dataset.bud] = v; });
-          await db.doc('groups/'+id).update({name, emoji:st.emoji, simplify: sh.querySelector('[data-simp="1"]').getAttribute('aria-pressed')==='true', archived: sh.querySelector('#arch').checked,
+          await db.doc('groups/'+id).update({name, emoji:st.emoji, simplify: sh.querySelector('[data-simp="1"]').getAttribute('aria-pressed')==='true', archived: sh.querySelector('#arch').checked, cur: sh.querySelector('#gcur').value==='CAD' ? null : sh.querySelector('#gcur').value,
             defaultSplit: byShares && Object.keys(shares).length ? {mode:'shares', input:{shares}} : null, budgets: Object.keys(budgets).length ? budgets : null});
         }
         if(isNew) await db.doc(`groups/${id}/members/${myUid}`).set({kind:'account', active:true, joinedAt:now, addedBy:myUid});
@@ -2322,9 +2380,12 @@ function openExpense(opts={}){
   const act = isGroup ? activeIn(ctx.id).map(m=>m.id) : mem;
   const st = { paidBy: myUid, cat: opts.asBill?'rent':(isGroup?'groceries':'food'), mode:'equal', ids:new Set(act),
     shares:Object.fromEntries(mem.map(id=>[id,1])), pct:Object.fromEntries(mem.map((id,i)=>[id, i===mem.length-1 ? +(100 - +(100/mem.length).toFixed(2)*(mem.length-1)).toFixed(2) : +(100/mem.length).toFixed(2)])), exact:{},
-    items:[], tax:'', tip:'', cur:'CAD', rate:'', repeat:!!opts.asBill && isGroup, every: bill?.every || 'month', variable:false, amount:'', title:'', date:today(), note:'', dupOk:false, photo: ex?.photo || null, refund: !!opts.refund };
+    items:[], tax:'', tip:'', cur:'CAD', rate:'', repeat:!!opts.asBill && isGroup, every: bill?.every || 'month', variable:false, amount:'', title:'', date:today(), note:'', dupOk:false, photo: ex?.photo || null, refund: !!opts.refund, two:false, paidBy2:null, paid2:'' };
   const g0 = isGroup ? S.groups[ctx.id] : null;
   if(g0?.defaultSplit && !src && !bill && !opts.prefill?.ids && !opts.prefill?.exact) { st.mode = g0.defaultSplit.mode || 'equal'; if(st.mode==='shares') st.shares = Object.fromEntries(mem.map(id=>[id, g0.defaultSplit.input?.shares?.[id]||0])); if(st.mode==='pct') st.pct = Object.fromEntries(mem.map(id=>[id, g0.defaultSplit.input?.pct?.[id]||0])); if(st.mode==='equal' && g0.defaultSplit.input?.ids?.length) st.ids = new Set(g0.defaultSplit.input.ids.filter(id=>mem.includes(id))); }
+  // a group on a trip: new expenses start in the trip's currency
+  const tripCur = g0?.cur && CURRENCIES.includes(g0.cur) && g0.cur!=='CAD' && !src && !bill && !opts.asBill && !opts.prefill?.repeat && !opts.prefill?.cur ? g0.cur : null;
+  if(tripCur){ st.cur = tripCur; st.rate = rememberedRate(tripCur); }
   const c2s = c => c ? (c/100).toFixed(2) : '';
   const loadRule = (mode, input) => {
     st.mode = mode||'equal';
@@ -2363,6 +2424,10 @@ function openExpense(opts={}){
     <div id="refWrap" style="margin-top:14px"><button class="chip" id="moneyIn" aria-pressed="${st.refund}">${icon('coin','tiny')} Money coming in</button>
       <p class="note" id="refNote" style="margin:6px 2px 0">A refund, a deposit back or something sold. It comes off everyone’s share.</p></div>
     <label class="f" id="pbl">${st.refund?'Who got the money':'Paid by'}</label><div class="chips">${mem.map(id=>`<button class="chip" data-pb="${esc(id)}">${av(id,'sm',isGroup?ctx.id:null)}<span class="ell" style="max-width:8em">${esc(nameIn(id))}</span></button>`).join('')}</div>
+    ${!ex && mem.length>1 ? `<div id="twoBox"><button class="link" id="twoOn" type="button" style="margin-top:8px">Two people paid</button>
+      <div id="twoIn" hidden><label class="f">Who else paid</label><div class="chips">${mem.map(id=>`<button class="chip" data-pb2="${esc(id)}">${av(id,'sm',isGroup?ctx.id:null)}<span class="ell" style="max-width:8em">${esc(nameIn(id))}</span></button>`).join('')}</div>
+        <label class="f" for="paid2" id="paid2l">How much of it did they pay</label><div class="amount-wrap"><span id="paid2c">$</span><input id="paid2" inputmode="decimal" placeholder="0.00" autocomplete="off"></div>
+        <p class="note" id="twoNote">It’s saved as two entries, one for each person who paid, with everyone’s share divided between them.</p></div></div>` : ''}
     <label class="f" for="dt" id="dtl"></label><input class="in" id="dt" type="date" value="${esc(st.date)}">
     <label class="f">Split</label><p class="note likehint" id="likeHint" hidden style="margin:-4px 2px 10px"></p>
     ${ctx.type==='friend'?`<div class="chips" style="margin-bottom:10px"><button class="chip" data-qs="half">50/50</button><button class="chip" data-qs="theyowe">${esc(firstName(ctx.id))} owes it all</button><button class="chip" data-qs="iowe">I owe it all</button></div>`:''}
@@ -2405,7 +2470,9 @@ function openExpense(opts={}){
       else if(!n){ msg='Pick at least one person to split with.'; bad=true; }
       else if(st.mode==='pct' && Math.abs(pctSum-100)>0.011){ msg = `Percentages add up to ${+pctSum.toFixed(2)}%. They need to make 100%.`; bad=true; }
       else if(st.mode==='exact' && sum!==a){ msg = sum<a ? `${fmtCur(a-sum, st.cur)} still to assign.` : `${fmtCur(sum-a, st.cur)} more than the total.`; bad=true; }
-      else if(n===1 && Object.keys(sp)[0]===st.paidBy) msg = `Only the person who paid is in this, so nobody owes anything.`;
+      else if(st.two && !st.repeat && !st.refund && (!st.paidBy2 || st.paidBy2===st.paidBy)){ msg='Pick the second person who paid.'; bad=true; }
+      else if(st.two && !st.repeat && !st.refund && !(toCents(st.paid2) > 0 && toCents(st.paid2) < a)){ msg=`Enter how much ${firstName(st.paidBy2)} paid. It has to be less than the total.`; bad=true; }
+      else if(n===1 && Object.keys(sp)[0]===st.paidBy && !st.two) msg = `Only the person who paid is in this, so nobody owes anything.`;
       else msg = st.mode==='items' ? `Tax and tip are shared in proportion to what each person ordered.` : n===1 ? `${youOr(Object.keys(sp)[0])} ${Object.keys(sp)[0]===myUid?'owe':'owes'} all of it.` : `Split ${n} ways.`;
       $('#sn').textContent = msg; $('#sn').className = 'note'+(bad?' bad':'');
       const ok = (!!a || (st.repeat&&st.variable)) && !bad && !!$('#ttl').value.trim();
@@ -2455,6 +2522,7 @@ function openExpense(opts={}){
       if(st.repeat){ st.cur='CAD'; $('#cur').value='CAD'; } $('#cur').disabled = st.repeat;
       if($('#refWrap')){ $('#refWrap').hidden = st.repeat; if(st.repeat) st.refund = false; $('#moneyIn').setAttribute('aria-pressed', st.refund); $('#refNote').hidden = !st.refund; $('#pbl').textContent = st.refund ? 'Who got the money' : 'Paid by'; }
       $('#dtl').textContent = st.repeat ? (bill ? 'Next due date (repeats from this day)' : 'First due date') : 'Date';
+      if(st.drawTwo) st.drawTwo();
       sh.querySelectorAll('[data-every]').forEach(b=>b.setAttribute('aria-pressed', b.dataset.every===st.every));
       drawRows();
     }
@@ -2463,14 +2531,23 @@ function openExpense(opts={}){
     const press = (attr, val) => sh.querySelectorAll(`[${attr}]`).forEach(b=>b.setAttribute('aria-pressed', b.getAttribute(attr)===val));
     sh.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{st.cat=b.dataset.cat;press('data-cat',st.cat);});
     sh.querySelectorAll('[data-pb]').forEach(b=>b.onclick=()=>{st.paidBy=b.dataset.pb;press('data-pb',st.paidBy);check();});
+    if($('#twoOn')){
+      const drawTwo = () => { $('#twoIn').hidden = !st.two; $('#twoOn').textContent = st.two ? 'Only one person paid' : 'Two people paid';
+        $('#twoBox').hidden = st.repeat || st.refund; $('#paid2c').textContent = st.cur==='CAD' ? '$' : st.cur;
+        $('#paid2l').textContent = st.paidBy2 ? `How much of it did ${firstName(st.paidBy2)} pay` : 'How much of it did they pay'; press('data-pb2', st.paidBy2); };
+      $('#twoOn').onclick = () => { st.two = !st.two; drawTwo(); check(); if(st.two && st.paidBy2) $('#paid2').focus(); };
+      sh.querySelectorAll('[data-pb2]').forEach(b=>b.onclick=()=>{ st.paidBy2=b.dataset.pb2; drawTwo(); check(); });
+      $('#paid2').oninput = () => { st.paid2 = $('#paid2').value; check(); };
+      st.drawTwo = drawTwo; drawTwo(); }
     sh.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{ st.mode=b.dataset.mode; if(st.mode==='items' && !st.items.length){ st.items=[{n:$('#ttl').value.trim(), p:$('#amt').value, ids:new Set(act)}]; } drawRows(); });
     sh.querySelectorAll('[data-qs]').forEach(b=>b.onclick=()=>{ const q=b.dataset.qs;
       if(q==='half'){ st.mode='equal'; st.ids=new Set(mem); }
       if(q==='theyowe'){ st.paidBy=myUid; st.mode='equal'; st.ids=new Set([ctx.id]); }
       if(q==='iowe'){ st.paidBy=ctx.id; st.mode='equal'; st.ids=new Set([myUid]); }
       press('data-pb',st.paidBy); drawRows(); });
-    $('#cur').onchange = async () => { st.cur = $('#cur').value; if(st.cur!=='CAD' && !$('#rate').value) $('#rate').value = rememberedRate(st.cur); check();
+    $('#cur').onchange = async () => { st.cur = $('#cur').value; if(st.drawTwo) st.drawTwo(); if(st.cur!=='CAD' && !$('#rate').value) $('#rate').value = rememberedRate(st.cur); check();
       if(st.cur!=='CAD' && !st.repeat){ const cur = st.cur, live = await liveRate(cur); if(live && st.cur===cur && sh.isConnected){ $('#rate').value = live.toFixed(4); $('#rate').title = 'Today’s rate (European Central Bank, via frankfurter.app)'; check(); } else if(!$('#rate').value) $('#rate').focus(); } };
+    if(tripCur) $('#cur').onchange();   // fetch today's rate for the trip's currency
     $('#rate').oninput = check;
     const chg = $('#chg'); if(chg) chg.onclick = () => pickContext(c => openExpense({...opts, ctx:c, copyOf:null, prefill:{...(pre||{}), title:$('#ttl').value, amount:foreignAmt(), cur:st.cur, cat:st.cat, date:$('#dt').value, note:$('#nt')?.value||'', ai:false, items:null}}), 'Move it to…');
     if($('#rep')) $('#rep').onchange = () => { st.repeat = $('#rep').checked; if(!st.repeat) st.variable=false; syncRepeat(); };
@@ -2563,6 +2640,20 @@ function openExpense(opts={}){
           orig: st.cur==='CAD' ? null : {cur:st.cur, amount:a, rate:rate()}, photo: st.photo || null, people:[...new Set([st.paidBy, ...Object.keys(split)])] };
         const priv = ex ? !!ex._priv : ctxIsPrivate(ctx);
         const ref = priv ? privDoc().collection('entries').doc(id) : db.doc('expenses/'+id);
+        if(!ex && st.two && !st.refund){
+          // Two people paid: one entry for each of them. Everyone's share is divided between the two in proportion
+          // to what each paid, so the balances come out exactly as if it were one bill with two payers.
+          const f2 = toCents(st.paid2), b = st.cur==='CAD' ? f2 : Math.min(cad-1, Math.max(1, Math.round(f2*rate()))), id2 = newId('e');
+          const s1 = splitShares(cad-b, split, id), s2 = {}; for(const [k,v] of Object.entries(split)) if(v-(s1[k]||0) > 0) s2[k] = v-(s1[k]||0);
+          const ref2 = priv ? privDoc().collection('entries').doc(id2) : db.doc('expenses/'+id2);
+          const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact:sp}, orig: st.cur==='CAD' ? null : {cur:st.cur, amount:oa, rate:rate()},
+            photo: n===1 ? body.photo : null, people:[...new Set([by, ...Object.keys(sp)])], pair:{id, n, total:cad, other: n===1 ? id2 : id},
+            ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now()+n-1, addedBy:myUid});
+          done = await write(async () => { await ref.set(part(1, st.paidBy, cad-b, s1, a-f2)); await ref2.set(part(2, st.paidBy2, b, s2, f2)); });
+          if(done){ closeSheet(); buzz(10); toast('Added as two entries', {label:'Undo', fn:()=>write(async()=>{ await ref.update({deletedAt:Date.now(), deletedBy:myUid}); await ref2.update({deletedAt:Date.now(), deletedBy:myUid}); })});
+            if(isGroup) write(()=>db.doc('groups/'+ctx.id).update({lastAt:Date.now()}), true); postDueBills(); } else $('#save').disabled = false;
+          return;
+        }
         if(ex) { const hist = [...(ex.history||[]).slice(-9), {at: ex.editedAt||ex.createdAt||null, by: ex.editedBy||ex.addedBy||null, amount: ex.amount, title: ex.title, paidBy: ex.paidBy, n: Object.keys(ex.split||{}).length}];
           done = await write(() => ref.update({...body, status:null, editedAt:Date.now(), editedBy:myUid, history:hist})); msg='Changes saved'; }
         else { done = await write(() => ref.set({kind:'expense', ...body, ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now(), addedBy:myUid})); msg=st.refund?'Money in added':'Expense added';
@@ -2590,7 +2681,7 @@ function openDetail(id, priv){
   } else {
     const [,,lab] = catOf(e.category), needs = e.status==='needs_amount';
     const rule = ({shares:'by shares', exact:'by exact amounts', pct:'by percentage', items:'by items'})[e.splitMode] || 'equally';
-    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} CAD`:'', `${lab}, ${dayLabel(e.date)}`, e.amount<0 ? `Money in. ${youOr(e.paidBy)} got it, shared ${rule}` : `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
+    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} CAD`:'', e.pair?`Part ${e.pair.n} of a ${money(e.pair.total)} bill two people paid`:'', `${lab}, ${dayLabel(e.date)}`, e.amount<0 ? `Money in. ${youOr(e.paidBy)} got it, shared ${rule}` : `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
     body = `<p class="detail-amt">${needs?'Needs amount':e.amount<0?'+'+money(-e.amount):money(e.amount)}</p><p class="note" style="margin:6px 0 0">${esc(meta)}.</p>
       ${e.note?`<p class="banner" style="margin:12px 0 0">${esc(e.note)}</p>`:''}${delNote}
       ${e.photo&&LAPTOP?`<a class="rphoto" href="/api/photo/${esc(e.photo)}" target="_blank" rel="noopener"><img src="/api/photo/${esc(e.photo)}" alt="Receipt photo" loading="lazy"><span>Receipt photo · tap to open</span></a>`:''}
@@ -3055,7 +3146,7 @@ function openImport(gid){
       const already = new Set(alive(groupEntries(gid)).map(e => e.swKey).filter(Boolean));
       const guess = n => mem.find(id => nameOf(id).toLowerCase() === n.toLowerCase()) || mem.find(id => firstName(id).toLowerCase() === n.split(' ')[0].toLowerCase()) || '';
       sh.querySelector('#swBody').innerHTML = `<label class="f">Who is who</label><div class="split">${names.map((n,i)=>`<div class="srow"><span class="nm">${esc(n)}</span><select class="sel" data-sw="${i}"><option value="">Skip</option>${mem.map(id=>`<option value="${esc(id)}" ${guess(n)===id?'selected':''}>${esc(youOr(id))}</option>`).join('')}</select></div>`).join('')}</div>
-        <p class="note">${data.length} rows in the file. Rows already imported are skipped. Each row becomes one expense with everyone’s exact share, so balances match Splitwise.</p>
+        <p class="note">${data.length} rows in the file. Rows already imported are skipped. Each row becomes one expense with everyone’s exact share, so balances match Splitwise. Payments to someone who uses Split it wait for that person to confirm them, like any other payment.</p>
         <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn primary" id="swGo">Import ${data.length} rows</button></div>`;
       sh.querySelector('#swGo').onclick = async () => {
         const map = names.map((n,i) => sh.querySelector(`[data-sw="${i}"]`).value);
@@ -3070,7 +3161,7 @@ function openImport(gid){
             const payerI = nets.indexOf(Math.max(...nets)); const payer = map[payerI]; if(!payer){ bad++; continue; }
             const isPay = /^payment$/i.test(r[ci.category]||'');
             if(isPay){ const toI = nets.findIndex((v,i) => v < 0 && i !== payerI), to = map[toI]; if(!to){ bad++; continue; }
-              await db.doc('expenses/'+newId('e')).set({kind:'payment', from:payer, to, amount:cost, date, createdAt:Date.now(), addedBy:myUid, confirmed:true, people:[payer,to], groupId:gid, swKey:key}); n++; continue; }
+              await db.doc('expenses/'+newId('e')).set({kind:'payment', from:payer, to, amount:cost, date, createdAt:Date.now(), addedBy:myUid, confirmed: to===myUid || isGuest(to), people:[payer,to], groupId:gid, swKey:key}); n++; continue; }
             const split = {}; nets.forEach((v,i) => { const id = map[i]; if(!id) return; const sh2 = i===payerI ? cost - v : -v; if(sh2 > 0) split[id] = (split[id]||0) + sh2; });
             const sum = sumOf(split); if(!sum){ bad++; continue; }
             if(sum !== cost){ const k = Object.keys(split)[0]; split[k] += cost - sum; }   // rounding dust
@@ -3392,20 +3483,28 @@ async function openAdmin(){
   if(!hh.lastBackupAt && !o.backups.length) warn.push('No backup yet. One is made every hour the server runs.');
   if(!hh.email) warn.push('Email isn’t set up (RESEND_API_KEY), so password resets go through you: use “Reset link” below.');
   if(!hh.publicUrl) warn.push('PUBLIC_URL isn’t set, so links in emails and calendars use whatever address the phone used.');
+  if(!hh.copyDir) warn.push('Backups only live on this laptop. Set BACKUP_COPY_DIR in split-it.env to a USB drive or a synced folder for a copy that survives the disk.');
+  else if(hh.copyError) warn.push('The backup copy off the laptop failed: ' + hh.copyError);
+  else if(hh.copyAt && Date.now()-hh.copyAt > 3*864e5) warn.push('The backup copy off the laptop is more than 3 days old.');
   const stat = (v, k) => `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`;
   openSheet(head('Run Split it') + `
+    <div id="admUpdate"></div>
     ${warn.length?`<div class="banner">${warn.map(esc).join('<br>')}</div>`:''}
-    <label class="f">Health</label><div class="health">${stat('v'+esc(hh.version), 'Split it on Node '+esc(hh.node))}${stat(ago(Date.now()-hh.uptime).replace(' ago','').replace('just now','a moment'), 'running for')}${stat(fmtBytes(hh.dbBytes), hh.docs+' records')}${stat(hh.photos, 'receipt photos, '+fmtBytes(hh.photoBytes))}${hh.disk?stat(fmtBytes(hh.disk.free), 'free on disk'):''}${stat(ago(hh.lastBackupAt), 'last backup')}${stat(ago(hh.lastBillRun), 'bills checked')}${stat(hh.listeners, 'phones open now')}</div>
+    <label class="f">Health</label><div class="health">${stat('v'+esc(hh.version), 'Split it on Node '+esc(hh.node))}${stat(ago(Date.now()-hh.uptime).replace(' ago','').replace('just now','a moment'), 'running for')}${stat(fmtBytes(hh.dbBytes), hh.docs+' records')}${stat(hh.photos, 'receipt photos, '+fmtBytes(hh.photoBytes))}${hh.disk?stat(fmtBytes(hh.disk.free), 'free on disk'):''}${stat(ago(hh.lastBackupAt), 'last backup')}${hh.copyDir?stat(hh.copyAt?ago(hh.copyAt):'not yet', 'copy off the laptop'):''}${stat(ago(hh.lastBillRun), 'bills checked')}${stat(hh.listeners, 'phones open now')}</div>
     <p class="note">${hh.email?'Email is on.':'Email is off.'} ${hh.google?'Google sign-in is on.':'Google sign-in is off.'} Reminders go out after ${hh.remindHour}:00. Data lives in <span style="word-break:break-all">${esc(hh.dataDir)}</span>.</p>
     <label class="f">People (${o.people.length})${o.invites?` · ${o.invites} open invite${o.invites===1?'':'s'}`:''}</label>
-    <div class="card">${o.people.map(p => `<button class="row" data-adm="${esc(p.id)}">${av(p.id)}<div class="body"><div class="t ell">${esc(p.nickname||p.name)}${p.owner?' <small class="mut">owner</small>':''}</div><div class="m">${p.lastSeen?'Seen '+ago(p.lastSeen):'Never opened it'}${p.push?' · phone alerts on':''}${p.mcp?' · '+p.mcp+' assistant'+(p.mcp===1?'':'s'):''}${!p.hasPassword&&!p.google&&!p.email?' · no way to sign in yet':''}</div></div><span class="chev">›</span></button>`).join('')}</div>
+    <div class="card">${o.people.map(p => `<button class="row" data-adm="${esc(p.id)}">${av(p.id)}<div class="body"><div class="t ell">${esc(p.nickname||p.name)}${p.owner?' <small class="mut">owner</small>':''}</div><div class="m">${p.lastSeen?'Seen '+ago(p.lastSeen):'Never opened it'}${p.push?' · phone alerts on':''}${p.mcp?' · '+p.mcp+' assistant'+(p.mcp===1?'':'s'):''}${p.code?' · sign-in code on':''}${!p.hasPassword&&!p.google&&!p.email?' · no way to sign in yet':''}</div></div><span class="chev">›</span></button>`).join('')}</div>
     <label class="f">Backups</label>
-    <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn primary" href="/api/admin/backup" download>Download everything (zip)</a><button class="btn" id="admRestore">Restore a backup…</button><button class="btn" id="admPush">Test notifications</button></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn primary" href="/api/admin/backup" download>Download everything (zip)</a><button class="btn" id="admRestore">Restore a backup…</button>${hh.copyDir?'<button class="btn" id="admCopy">Copy off the laptop now</button>':''}<button class="btn" id="admPush">Test notifications</button></div>
     <input type="file" id="admFile" accept=".zip,.json,application/zip,application/json" hidden>
-    <p class="note">The zip has every record, sign-in, and receipt photo. Keep one somewhere that isn’t the laptop. Daily copies of the records live on the laptop too:</p>
+    <p class="note">The zip has every record, sign-in, and receipt photo. ${hh.copyDir?`A full zip also goes to <span style="word-break:break-all">${esc(hh.copyDir)}</span> every day, 14 kept.`:'Keep one somewhere that isn’t the laptop.'} Daily copies of the records live on the laptop too:</p>
     ${o.backups.length?`<div class="card">${o.backups.slice(0,12).map(b => `<a class="row" href="/api/admin/backup/${esc(b.file)}" download style="text-decoration:none;color:inherit"><span class="ic">${icon('box')}</span><div class="body"><div class="t">${esc(b.file.replace(/^db-(weekly-)?/,'').replace('.json',''))}${/weekly/.test(b.file)?' <small class="mut">weekly</small>':''}</div><div class="m">${fmtBytes(b.bytes)}</div></div><span class="chev">↓</span></a>`).join('')}</div>`:''}`, sh => {
     sh.querySelectorAll('[data-adm]').forEach(b => b.onclick = () => openAdminPerson(o.people.find(p => p.id===b.dataset.adm)));
     sh.querySelector('#admPush').onclick = async () => { try{ const r = await api('/api/admin/test-push', {}); toast(`Sent to ${r.sent} phone${r.sent===1?'':'s'}`); }catch(e){ toast(e.message); } };
+    const cp = sh.querySelector('#admCopy'); if(cp) cp.onclick = async () => { cp.disabled = true; try{ await api('/api/admin/copy-now', {}); toast('Copied off the laptop'); }catch(e){ toast(e.message); } cp.disabled = false; };
+    // a newer Split it on GitHub? (asked only here, at most twice a day)
+    api('/api/admin/update').then(u => { const el = sh.querySelector('#admUpdate'); if(!el || !u.newer) return;
+      el.innerHTML = `<div class="banner">Split it v${esc(u.latest)} is out. This laptop runs v${esc(u.current)}. ${u.url?`<a href="${esc(u.url)}" target="_blank" rel="noopener">See what’s new</a>. `:''}To update: <code>git pull</code>, then <code>bash install.sh</code>.</div>`; }).catch(()=>{});
     const file = sh.querySelector('#admFile');
     sh.querySelector('#admRestore').onclick = () => file.click();
     file.onchange = async () => { const f = file.files?.[0]; if(!f) return;
@@ -3429,6 +3528,7 @@ function openAdminPerson(p){
       <button class="row" id="apReset"><span class="ic">${icon('star')}</span><div class="body"><div class="t">Make a reset link</div><div class="m">For when they’re locked out. Works once, for a day. Send it to them yourself.</div></div><span class="chev">›</span></button>
       <button class="row" id="apRename"><span class="ic">${icon('people')}</span><div class="body"><div class="t">Change their sign-in name</div><div class="m">Now “${esc(p.name)}”. Their nickname in the app is theirs to set.</div></div><span class="chev">›</span></button>
       <button class="row" id="apOut"><span class="ic">${icon('x')}</span><div class="body"><div class="t">Sign them out everywhere</div><div class="m">If a phone was lost. They sign in again as usual.</div></div><span class="chev">›</span></button>
+      ${p.code?`<button class="row" id="apCode"><span class="ic">${icon('x')}</span><div class="body"><div class="t">Turn off their sign-in code</div><div class="m">If they lost the phone with their authenticator app. Their password still works.</div></div><span class="chev">›</span></button>`:''}
       ${me2?'':`<button class="row" id="apOwner"><span class="ic">${icon('sparkle')}</span><div class="body"><div class="t">${p.owner?'Stop being an owner':'Make them an owner'}</div><div class="m">Owners see this page and can restore backups.</div></div><span class="chev">›</span></button>`}
       ${me2?'':`<button class="row" id="apRemove"><span class="ic">${icon('box')}</span><div class="body"><div class="t" style="color:var(--owe)">Remove from Split it</div><div class="m">They can’t sign in again. Their expenses stay so balances still add up.</div></div><span class="chev">›</span></button>`}
     </div><div id="apBox"></div>`, sh => {
@@ -3439,15 +3539,20 @@ function openAdminPerson(p){
     sh.querySelector('#apRename').onclick = () => { box.innerHTML = `<label class="f" for="apName">New sign-in name</label><div class="cbox"><input class="in" id="apName" maxlength="30" value="${esc(p.name)}"><button class="btn primary" id="apSave">Save</button></div>`;
       box.querySelector('#apSave').onclick = async () => { try{ await api('/api/admin/rename', {id:p.id, name:box.querySelector('#apName').value}); toast('Saved'); openAdmin(); }catch(e){ toast(e.message); } }; };
     sh.querySelector('#apOut').onclick = async () => { try{ const r = await api('/api/admin/signout', {id:p.id}); toast(`Signed out of ${r.sessions} device${r.sessions===1?'':'s'}`); if(me2) location.href = '/login'; }catch(e){ toast(e.message); } };
+    const cd = sh.querySelector('#apCode'); if(cd) cd.onclick = async () => { if(!confirmTap(cd, 'Tap again to turn it off')) return; try{ await api('/api/admin/code-off', {id:p.id}); toast('Sign-in code turned off'); openAdmin(); }catch(e){ toast(e.message); } };
     const ow = sh.querySelector('#apOwner'); if(ow) ow.onclick = async () => { try{ await api('/api/admin/owner', {id:p.id, owner:!p.owner}); toast(p.owner?'No longer an owner':'They’re an owner now'); openAdmin(); }catch(e){ toast(e.message); } };
     const rm = sh.querySelector('#apRemove'); if(rm) rm.onclick = async () => { if(!confirmTap(rm, `Remove ${p.name} for good? Tap again`)) return; try{ await api('/api/admin/remove', {id:p.id}); toast(`Removed ${p.name}`); openAdmin(); }catch(e){ toast(e.message); } };
   });
 }
 /* ================= home-screen shortcuts (?do=add, ?do=settle) ================= */
 let pendingDo = new URLSearchParams(location.search).get('do');
-if(pendingDo){ try{ history.replaceState(history.state, '', location.pathname); }catch(e){} }
+// Shared from another app (a banking app, a message, a note): the words arrive as ?text= and go through quick add.
+let pendingShare = (() => { const q = new URLSearchParams(location.search); return [q.get('title'), q.get('text')].filter(Boolean).join(' ').replace(/\s+/g,' ').trim().slice(0,200) || null; })();
+if(pendingDo || pendingShare){ try{ history.replaceState(history.state, '', location.pathname); }catch(e){} }
 function runPendingDo(){
-  if(!pendingDo || !ready() || !myUid || !S.people[myUid]) return;
+  if(!ready() || !myUid || !S.people[myUid]) return;
+  if(pendingShare && canWrite){ const t = pendingShare; pendingShare = null; pendingDo = null; setTimeout(() => quickAdd(t), 300); return; }
+  if(!pendingDo) return;
   const d = pendingDo; pendingDo = null;
   setTimeout(() => {
     if(d==='add') document.getElementById('addBtn').click();

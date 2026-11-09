@@ -10,11 +10,11 @@ Split it tracks who paid for what in a shared home: rent, hydro, groceries, the 
 
 What's in this repo:
 
-- `server.js` runs the app. No npm packages to install, just Node.js 18+.
+- `server.js` runs the app. No npm packages to install, just Node.js 22 or newer.
 - `public/` is the app page and sign-in pages.
 - `data/` is created on first run and never committed. It holds everything: `db.json` (groups and expenses), `users.json` (sign-ins), `photos/` (receipt photos), `push.json` and `push-keys.json` (phone notifications), and `backups/` (a copy of `db.json` every day for 30 days, and every Sunday for a year).
-- `test/` checks the split rules. `node --test test/*.test.js` runs it; `install.sh` runs it for you.
-- `Dockerfile` and `compose.yaml` if you'd rather run it in a container (`docker compose up -d`, then `docker compose exec split-it node server.js add-user YOU`).
+- `test/` checks the split rules and the whole server (who can see what, the money rules, sign-in, backups). `node --test test/*.test.js` runs it.
+- `Dockerfile` and `compose.yaml` if you'd rather run it in a container (`docker compose up -d`, then `docker compose exec split-it node server.js add-user YOU`). Inside the container the app runs as an ordinary user, not root.
 - `docs/` is the website, served by GitHub Pages.
 
 ## Quick install
@@ -27,7 +27,9 @@ cd split-it
 bash install.sh
 ```
 
-It does steps 1, 2 and 5 below for you (installs Node.js if needed, copies the app to `~/house-split`, and starts it on boot). Then do step 3 to add people, and step 6 for access from phones. Running it again later (after `git pull`) updates the app and keeps your data.
+It does steps 1, 2 and 5 below for you (installs Node.js if needed, copies the app to `~/split-it`, and starts it on boot). Then do step 3 to add people, and step 6 for access from phones. Running it again later (after `git pull`) updates the app and keeps your data and settings.
+
+**Coming from v2.1 or older?** The app used to live in `~/house-split` with a service called `house-split`. Run `bash install.sh` from the new download and it moves the folder to `~/split-it` (data and settings included) and swaps the service for `split-it`. Nothing else to do.
 
 ## 1. Install Node.js (once)
 
@@ -37,30 +39,30 @@ Open a terminal and check the version:
 node -v
 ```
 
-You need version 18 or newer. If it's missing or older:
+You need version 22 or newer (older ones no longer get security fixes). If it's missing or older:
 
 ```
-curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_24.x | sudo -E bash -
 sudo apt install -y nodejs
 ```
 
-(That's for Ubuntu, Mint, Debian and similar. On other systems, install Node.js 18+ with your package manager.)
+(That's for Ubuntu, Mint, Debian and similar. On other systems, install Node.js 22 or newer with your package manager.)
 
 ## 2. Put the app in your home folder
 
-Copy this whole folder to `~/house-split` on the laptop, so you end up with `~/house-split/server.js`.
+Copy this whole folder to `~/split-it` on the laptop, so you end up with `~/split-it/server.js`.
 
 ## 3. Add yourself, then invite everyone else
 
 ```
-cd ~/house-split
+cd ~/split-it
 node server.js add-user Sam
 ```
 
 It asks for a password (8 characters or more). The first person added is the owner.
 
 To bring in friends, open the app, go to **Friends**, tap **Add friend**, then **Make an invite link**. Send them the link. They pick their own name and password, and you're friends right away. Each link works once and lasts 7 days. Anyone signed in can make invite links. You can still add people by hand with `node server.js add-user NAME`.
-Forgot a password? `node server.js set-password Alex`. See everyone: `node server.js list-users`. Someone moved out? `node server.js remove-user Alex` signs them out everywhere and turns off their notifications; their past expenses stay. Restart the server after any of these.
+Forgot a password? `node server.js set-password Alex`. See everyone: `node server.js list-users`. Someone moved out? `node server.js remove-user Alex` signs them out everywhere and turns off their notifications; their past expenses stay. `node server.js code-off Alex` turns off their sign-in code if they lost their phone. These all work while the app is running and take effect right away, no restart needed.
 
 ## 4. Try it
 
@@ -74,14 +76,14 @@ Open http://localhost:8080 on the laptop and sign in. Press Ctrl+C to stop it.
 
 ```
 mkdir -p ~/.config/systemd/user
-cp ~/house-split/house-split.service ~/.config/systemd/user/
+cp ~/split-it/split-it.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now house-split
+systemctl --user enable --now split-it
 sudo loginctl enable-linger $USER
 ```
 
 The last line keeps it running even when nobody is logged in on the laptop.
-Check on it with `systemctl --user status house-split`. After adding a user, restart it with `systemctl --user restart house-split`.
+Check on it with `systemctl --user status split-it`, and restart it with `systemctl --user restart split-it` after changing `split-it.env`.
 
 ## 6. Reach it from anywhere (free)
 
@@ -108,7 +110,7 @@ sudo systemctl restart systemd-logind
 
 ## Sign-in options: email and Google (optional)
 
-Everyone can always sign in with their name (or checked email) and password. Two extras need a little setup, both free for a group of friends. Put the settings in a file called `split-it.env` next to `server.js` (copy `split-it.env.example`), then restart: `systemctl --user restart house-split`.
+Everyone can always sign in with their name (or checked email) and password. Two extras need a little setup, both free for a group of friends. Put the settings in a file called `split-it.env` next to `server.js` (copy `split-it.env.example`), then restart: `systemctl --user restart split-it`.
 
 Split it stays private either way: nobody can make an account without an invite link from someone already in. Google and email only sign in people who already have an account.
 
@@ -127,18 +129,36 @@ Split it stays private either way: nobody can make an account without an invite 
 
 In your profile you can also change your password and sign out on all devices.
 
+## Sign-in code (optional, recommended for the owner)
+
+A second step after your password: a 6-digit code from an authenticator app on your phone (Google Authenticator, Microsoft Authenticator, 1Password, Aegis, any of them). Someone who learns your password still can't get in without your phone.
+
+Turn it on in your profile under **Signing in**, then **Sign-in code**. The app gives you a key to add to your authenticator app and asks for one code to prove it works. It then shows 8 backup codes, each good once, for the day your phone is lost. Keep them somewhere safe.
+
+- An AI assistant connecting to your account is asked for the code too.
+- A password reset link changes the password but doesn't skip the code.
+- Lost the phone and the backup codes? The owner can turn the code off for you from **People, backups and health**, or on the laptop: `node server.js code-off NAME`.
+
+Wrong passwords and codes are limited: 5 tries from one address, or 10 for one account from anywhere, then a 15 minute wait.
+
 ## Running it from the app (owner)
 
 Tap your picture, then **People, backups and health**. That page shows whether the laptop is healthy (disk, last backup, bills), everyone who's signed up (last seen, notifications on), and lets you:
 
 - make a **reset link** for someone who's locked out (no email needed; send it to them yourself),
 - rename, sign out everywhere, make an owner, or remove someone,
+- turn off someone's sign-in code if they lost their phone,
 - **download a full backup** as one zip (records, sign-ins, photos), and **restore** one later,
+- see when the last copy went to your second backup place, and make one now,
 - send a test notification to everyone.
+
+It also tells you when a newer Split it is out. For that it asks GitHub for the latest release when you open the page (at most twice a day) and sends nothing about your house. `UPDATE_CHECK=off` in `split-it.env` stops it.
 
 ## Backups
 
-The app keeps a copy of `db.json` in `data/backups/` once a day (30 kept) and once a week (a year kept). For a real backup, download the zip from the page above every so often and keep it somewhere that isn't the laptop. `node server.js backup my-backup.zip` does the same from the terminal.
+The app keeps a copy of `db.json` in `data/backups/` once a day (30 kept) and once a week (a year kept). `node server.js backup my-backup.zip` writes a full zip from the terminal.
+
+**A copy that survives the laptop.** Those daily copies sit on the same disk as the app, so a dead disk takes them too. Set `BACKUP_COPY_DIR` in `split-it.env` to a folder somewhere else: a USB drive that stays plugged in, or a folder that Dropbox, Syncthing or Nextcloud sends off the laptop. Once a day a full zip (records, sign-ins, photos) goes there, and the newest 14 are kept. The owner's page warns you when no second place is set, when a copy fails (drive unplugged), and when the newest copy is more than 3 days old. The zip holds everyone's sign-ins, so put it somewhere only you can read.
 
 To restore: in the app, **Restore a backup** takes the zip or any of the daily files. A copy of what was there is saved first, so it can be undone.
 
@@ -173,7 +193,7 @@ You get a notification for:
 
 Notifications need the https address from step 6. They don't work on plain http://localhost, except on the laptop itself.
 Nothing to set up on the laptop: the app makes its own notification keys in `data/push-keys.json` on first run.
-To send bill reminders at a different hour, add `Environment=REMIND_HOUR=8` under `[Service]` in `house-split.service`.
+To send bill reminders at a different hour, set `REMIND_HOUR=8` in `split-it.env` and restart.
 
 ## Quick add
 
@@ -181,7 +201,7 @@ Type an expense like a text on the Home screen, for example "groceries 54.20", "
 
 You can also **say it**: the microphone button uses the phone's own speech recognition. And **Paste a list** turns several lines into several expenses at once.
 
-**Receipts:** the camera button reads the receipt on the phone itself (Tesseract, downloaded once, about 10 MB), no AI and no account. It finds the store, total, date and items for you to check. `public/shim.js` still has a hook (`window.HouseSplitQuickAdd`) for adding an AI later; when it's set, it's used instead.
+**Receipts:** the camera button reads the receipt on the phone itself (Tesseract, downloaded once, about 10 MB), no AI and no account. It finds the store, total, date and items for you to check.
 
 ## Other handy bits
 
@@ -212,12 +232,12 @@ Split it has a connector (`mcp.js`) so Meta's Muse, Claude or ChatGPT can check 
 
 Use your real address, for example `https://old-laptop.tail1234.ts.net/mcp`. Muse sends you a sign-in link. Open it and sign in with your Split it name and password. Muse then acts as you. Each housemate connects their own Muse the same way.
 
-Then just ask: "what do I owe?", "who owes me in House?", "show my last 5 expenses", "add groceries 54.20 to House", "add pizza 30 with Alex", "I paid Alex 20", or "undo that" within 10 minutes. It asks you to check before adding anything. One-on-one expenses work with people who use the app; for anyone else, use a group. Amounts are split equally (open the app for other splits). Things it adds show up in the app straight away, and housemates get the usual notifications.
+Then just ask: "what do I owe?", "who owes me in House?", "show my last 5 expenses", "add groceries 54.20 to House", "add pizza 30 with Alex", "I paid Alex 20", or "undo that" within 10 minutes. It asks you to check before adding anything. It can also split by shares ("hydro 120, Alex pays double") or exact amounts, tell you who should pay whom to settle a group, list the bills coming up, and sum up a month. One-on-one expenses work with people who use the app; for anyone else, use a group. If you turned on a sign-in code, the sign-in page asks for it too. Things it adds show up in the app straight away, and housemates get the usual notifications.
 
 **If Muse asks for an API key or token instead of a sign-in:** on the laptop run
 
 ```
-cd ~/house-split
+cd ~/split-it
 node server.js mcp-key Sam
 ```
 
@@ -225,7 +245,7 @@ and give Muse the key it prints (it's a "Bearer" token). If there's only a box f
 
 **Disconnect:** `node server.js mcp-revoke Sam` signs out every assistant and key for that person. You can also remove the connector in Muse.
 
-If the sign-in link points at the wrong address, add `Environment=PUBLIC_URL=https://YOUR-ADDRESS` under `[Service]` in `house-split.service` and restart the app.
+If the sign-in link points at the wrong address, set `PUBLIC_URL=https://YOUR-ADDRESS` in `split-it.env` and restart the app.
 
 ## Character art
 

@@ -12,6 +12,10 @@
     } catch (e) { throw Object.assign(fail(e.message || 'network error', 'unavailable'), { offline: true }); }
     if (r.headers.get('X-From-Cache')) offlineNow(true); else offlineNow(false);
     if (r.status === 401) { location.href = '/login'; throw fail('signed out', 'unauthenticated'); }
+    if (r.status === 422) {   // the server checked the numbers and said why they can't be saved
+      const d = await r.json().catch(() => ({}));
+      throw fail(d.error || 'That can’t be saved as it is.', 'failed_precondition');
+    }
     if (!r.ok) {
       const msg = (await r.text().catch(() => '')) || r.statusText;
       throw fail(msg, r.status === 403 ? 'invalid_argument' : r.status === 404 ? 'not_found' : r.status >= 500 || r.status === 429 ? 'unavailable' : 'invalid_argument');

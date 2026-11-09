@@ -73,6 +73,15 @@ button:disabled{opacity:.6;cursor:default}
     <p class="err" role="alert"></p>
   </form>
 
+  <!-- second step, for people who turned on a sign-in code -->
+  <form id="vCode" hidden>
+    <p>Enter the 6-digit code from your authenticator app. Lost your phone? Use one of your backup codes.</p>
+    <label for="cd">Sign-in code</label><input id="cd" inputmode="numeric" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" required>
+    <button>Sign in</button>
+    <div class="links"><a href="#" data-view="vSignin">Start again</a></div>
+    <p class="err" role="alert"></p>
+  </form>
+
   <!-- opened from an email -->
   <form id="vReset" hidden>
     <p>Pick a new password. You’ll be signed out everywhere else.</p>
@@ -88,7 +97,7 @@ button:disabled{opacity:.6;cursor:default}
 </main>
 <script>
 const $ = id => document.getElementById(id);
-const views = ['vSignin', 'vForgot', 'vLink', 'vReset', 'vUse'];
+const views = ['vSignin', 'vCode', 'vForgot', 'vLink', 'vReset', 'vUse'];
 const show = v => { views.forEach(x => $(x).hidden = x !== v); const f = $(v).querySelector('input'); if (f) f.focus(); };
 const post = async (url, body) => {
   const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
@@ -124,11 +133,16 @@ fetch('/api/auth-options').then(r => r.json()).then(o => {
   document.querySelectorAll('.needs-email').forEach(x => x.hidden = !o.email);
 }).catch(() => {});
 
-run($('vSignin'), async () => { await post('/api/login', { name: $('n').value, password: $('pw').value }); location.href = '/'; });
+// Signed in, or one more step: the code from the authenticator app.
+let ticket = '';
+const done = d => { if (d.need === 'code') { ticket = d.ticket; $('cd').value = ''; show('vCode'); } else location.href = '/'; };
+run($('vSignin'), async () => done(await post('/api/login', { name: $('n').value, password: $('pw').value })));
+run($('vCode'), async () => { await post('/api/login/code', { ticket, code: $('cd').value }); location.href = '/'; });
 run($('vForgot'), async () => { const d = await post('/api/forgot', { who: $('fw').value }); note(d.note); show('vSignin'); });
 run($('vLink'), async () => { const d = await post('/api/email-link', { who: $('lw').value }); note(d.note); show('vSignin'); });
-run($('vReset'), async () => { await post('/api/reset', { token, password: $('np').value }); location.href = '/'; });
-run($('vUse'), async () => { await post('/api/email-link/use', { token }); location.href = '/'; });
+run($('vReset'), async () => { const d = await post('/api/reset', { token, password: $('np').value });
+  if (d.signin) { note('Password saved. Sign in with it and your sign-in code.'); show('vSignin'); } else location.href = '/'; });
+run($('vUse'), async () => done(await post('/api/email-link/use', { token })));
 </script>
 </body>
 </html>

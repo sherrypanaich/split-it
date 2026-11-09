@@ -6,7 +6,9 @@
 //   node server.js set-password NAME
 //   node server.js list-users
 //   node server.js remove-user NAME   (signs them out everywhere; their past expenses stay)
+//   node server.js code-off NAME      turn off someone's sign-in code (they lost their phone)
 //   node server.js backup FILE.zip    write a full backup (data, sign-ins, photos) to a zip file
+// These work while the app is running: the command hands the job to the running app.
 //
 // The owner can do all of the people and backup things from the app too: tap your picture, then "Run Split it".
 'use strict';
@@ -38,8 +40,12 @@ const BACKUP_DIR = path.join(DATA_DIR, 'backups');
 const PHOTO_DIR = path.join(DATA_DIR, 'photos');
 const PUSH_FILE = path.join(DATA_DIR, 'push.json');
 const PUSH_KEYS_FILE = path.join(DATA_DIR, 'push-keys.json');
-const PUSH_CONTACT = process.env.PUSH_CONTACT || 'mailto:house-split@example.com';
+const PUSH_CONTACT = process.env.PUSH_CONTACT || 'mailto:split-it@example.com';
 const REMIND_HOUR = +process.env.REMIND_HOUR || 9;   // bill reminders go out after this hour, laptop time
+// A second place for backups that isn't this laptop's data folder: a USB drive, or a folder a sync app
+// (Dropbox, Syncthing, Nextcloud...) sends elsewhere. One full zip a day goes there, 14 kept.
+const BACKUP_COPY_DIR = (process.env.BACKUP_COPY_DIR || '').trim() ? path.resolve(process.env.BACKUP_COPY_DIR.trim()) : null;
+const KEEP_COPIES = 14;
 const KEEP_BACKUPS = 30;          // daily copies
 const KEEP_WEEKLY = 52;           // Sunday copies, kept a year
 const SESSION_DAYS = 90;
@@ -89,7 +95,7 @@ const flushDb = () => { if (dbTimer) { clearTimeout(dbTimer); dbTimer = null; } 
 const saveDb = () => { dbDirty = true; if (!dbTimer) dbTimer = setTimeout(flushDb, 600); };
 const saveUsers = () => save(USERS_FILE, users);
 const savePushes = () => save(PUSH_FILE, pushes);
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { flushDb(); process.exit(0); });
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { flushDb(); dropLock(); process.exit(0); });
 process.on('beforeExit', flushDb);
 
 // ---------- passwords ----------
@@ -139,39 +145,68 @@ async function cli([cmd, ...rest]) {
     fs.writeFileSync(file, backupZip());
     return console.log(`Wrote ${file} (${(fs.statSync(file).size / 1e6).toFixed(1)} MB).`);
   }
+  if (!['add-user', 'set-password', 'remove-user', 'code-off'].includes(cmd)) return console.log('Commands: add-user NAME, set-password NAME, remove-user NAME, code-off NAME, list-users, backup FILE.zip, mcp-key NAME, mcp-revoke NAME');
+  if (!name) return console.log(`Usage: node server.js ${cmd} NAME`);
+  const found = findUser(name), job = { cmd, name };
+  if (cmd === 'add-user' && found) return console.log(`${name} already exists. Use set-password to change it.`);
+  if (cmd !== 'add-user' && !found) return console.log(`No user called ${name}.`);
   if (cmd === 'remove-user') {
-    if (!name) return console.log('Usage: node server.js remove-user NAME');
-    const found = findUser(name);
-    if (!found) return console.log(`No user called ${name}.`);
-    const [id, u] = found;
-    if (onlyOwner(id)) return console.log(`${u.name} is the owner. Make someone else the owner first, or remove the others.`);
-    const ok = await ask(`Remove ${u.name}? They can’t sign in again, but their past expenses stay. Type yes: `);
+    if (onlyOwner(found[0])) return console.log(`${found[1].name} is the owner. Make someone else the owner first, or remove the others.`);
+    const ok = await ask(`Remove ${found[1].name}? They can’t sign in again, but their past expenses stay. Type yes: `);
     if (ok.trim().toLowerCase() !== 'yes') return console.log('Nothing changed.');
-    const r = removeUser(id);
-    console.log(`Removed ${u.name}. Signed out ${r.sessions} session${r.sessions === 1 ? '' : 's'} and turned off ${r.subs} phone notification${r.subs === 1 ? '' : 's'}. Restart the server to pick this up.`);
-    return;
   }
   if (cmd === 'add-user' || cmd === 'set-password') {
-    if (!name) return console.log(`Usage: node server.js ${cmd} NAME`);
-    const found = findUser(name);
-    if (cmd === 'add-user' && found) return console.log(`${name} already exists. Use set-password to change it.`);
-    if (cmd === 'set-password' && !found) return console.log(`No user called ${name}.`);
-    const pw = await ask(`Password for ${name} (8+ characters): `);
-    if (pw.length < 8) return console.log('Too short, nothing saved.');
-    if (found) {
-      Object.assign(found[1], hashPw(pw));
-      for (const [t, s] of Object.entries(users.sessions)) if (s.uid === found[0]) delete users.sessions[t];
-    } else {
-      const uid = 'u_' + crypto.randomBytes(11).toString('hex');
-      users.users[uid] = { name, owner: !Object.keys(users.users).length, createdAt: Date.now(), ...hashPw(pw) };
-    }
-    saveUsers();
-    console.log('Saved. If the server is running, restart it to pick this up.');
-    return;
+    job.password = await ask(`Password for ${name} (8+ characters): `);
+    if (job.password.length < 8) return console.log('Too short, nothing saved.');
   }
-  console.log('Commands: add-user NAME, set-password NAME, remove-user NAME, list-users, backup FILE.zip, mcp-key NAME, mcp-revoke NAME');
+  // A running app keeps sign-ins in memory and would write its own copy back over ours, so it does the job itself.
+  const answer = await askServer(job);
+  if (answer && answer.text) return console.log(answer.text);
+  console.log(localCommand(job).text + (answer ? ' The app is running but didn’t answer, so restart it to pick this up.' : ''));
 }
-
+// What those commands do. Used here when the app is stopped, and by the running app when it is asked (see /api/local/cli).
+function localCommand({ cmd, name, password }) {
+  const found = findUser(name || '');
+  if (cmd === 'add-user') {
+    if (found) return { text: `${name} already exists. Use set-password to change it.` };
+    if (String(password || '').length < 8) return { text: 'Too short, nothing saved.' };
+    const clean = String(name).trim().replace(/\s+/g, ' ').slice(0, 30);
+    users.users['u_' + crypto.randomBytes(11).toString('hex')] = { name: clean, owner: !Object.keys(users.users).length, createdAt: Date.now(), ...hashPw(String(password)) };
+    saveUsers();
+    return { text: `Added ${clean}. They can sign in now.` };
+  }
+  if (!found) return { text: `No user called ${name}.` };
+  const [id, u] = found;
+  if (cmd === 'set-password') {
+    if (String(password || '').length < 8) return { text: 'Too short, nothing saved.' };
+    Object.assign(u, hashPw(String(password)));
+    const n = endSessions(id, { assistants: true });
+    return { text: `New password saved for ${u.name}. Signed out ${n} session${n === 1 ? '' : 's'} and any AI assistant.` };
+  }
+  if (cmd === 'remove-user') {
+    if (onlyOwner(id)) return { text: `${u.name} is the owner. Make someone else the owner first, or remove the others.` };
+    const r = removeUser(id);
+    return { text: `Removed ${u.name}. Signed out ${r.sessions} session${r.sessions === 1 ? '' : 's'} and turned off ${r.subs} phone notification${r.subs === 1 ? '' : 's'}.` };
+  }
+  if (cmd === 'code-off') return { text: accounts.codeOff(id) ? `Sign-in code turned off for ${u.name}. They can sign in with just their password and turn it on again.` : `${u.name} didn’t have a sign-in code on.` };
+  return { text: 'Unknown command.' };
+}
+// The running app writes data/server.lock: where it listens and a secret only this computer's user can read.
+const LOCK_FILE = path.join(DATA_DIR, 'server.lock');
+let localToken = null;
+function claimLock() {
+  localToken = crypto.randomBytes(24).toString('hex');
+  fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, port: PORT, token: localToken }), { mode: 0o600 });
+}
+const dropLock = () => { try { if (JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')).pid === process.pid) fs.unlinkSync(LOCK_FILE); } catch {} };
+async function askServer(job) {   // -> the running app's answer, null when none is running, {} when it didn't answer
+  let lock; try { lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')); process.kill(lock.pid, 0); } catch { return null; }
+  try {
+    const r = await fetch(`http://127.0.0.1:${lock.port}/api/local/cli`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Local-Token': lock.token },
+      body: JSON.stringify(job), signal: AbortSignal.timeout(8000) });
+    return r.ok ? await r.json() : {};
+  } catch { return {}; }
+}
 // ---------- sessions ----------
 const unesc = v => { try { return decodeURIComponent(v); } catch { return v; } };   // another app's odd cookie must not break sign-in
 const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';')
@@ -196,11 +231,15 @@ const clientIp = req => {
   if (!fwd || !isLocal(a)) return a;
   return String(fwd).split(',').map(x => x.trim()).filter(Boolean).pop() || a;
 };
-const tooManyTries = req => { const m = misses.get(clientIp(req)); return m && m.n >= 5 && Date.now() - m.at < 15 * 60e3 ? 'Too many tries. Wait 15 minutes.' : null; };
+// The same goes for one account: 10 misses from anywhere, then a 15 minute wait, so guessing from many addresses is slow too.
+const recent = k => { const m = misses.get(k); return m && Date.now() - m.at < 15 * 60e3 ? m.n : 0; };
+const bump = k => { misses.set(k, { n: recent(k) + 1, at: Date.now() }); if (misses.size > 5000) for (const [key, m] of misses) if (Date.now() - m.at > 15 * 60e3) misses.delete(key); };
+const noteMiss = (req, uid) => { bump(clientIp(req)); if (uid) bump('acct:' + uid); };
+const tooManyTries = (req, uid) => recent(clientIp(req)) >= 5 || (uid && recent('acct:' + uid) >= 10) ? 'Too many tries. Wait 15 minutes.' : null;
 function checkLogin(req, name, password) {   // returns the uid, or null (and counts the miss)
-  const ip = clientIp(req), m = misses.get(ip), found = findUser(name || '');
-  if (found && checkPw(String(password || ''), found[1])) { misses.delete(ip); return found[0]; }
-  misses.set(ip, { n: (m && Date.now() - m.at < 15 * 60e3 ? m.n : 0) + 1, at: Date.now() });
+  const found = findUser(name || '');
+  if (found && !tooManyTries(req, found[0]) && checkPw(String(password || ''), found[1])) { misses.delete(clientIp(req)); return found[0]; }
+  noteMiss(req, found && found[0]);
   return null;
 }
 
@@ -244,6 +283,50 @@ function canWrite(uid, p, after) {
   if (after !== undefined && !canRead(uid, p, after)) return false;
   if (s[0] === 'people' && s.length === 2) return s[1] === uid;   // only your own profile
   return true;
+}
+
+// ---------- money rules, checked on every save ----------
+// The page already follows these. Checking them here too means nobody can save shares that don't
+// add up, or mark a payment to someone else as received, by talking to the server directly.
+// Only the parts of an entry that carry money are checked, and only when they are new or changed,
+// so older entries can still be commented on, moved or deleted exactly as they are.
+const sameJson = (a, b) => { const norm = o => JSON.stringify(Object.keys(o || {}).sort().map(k => [k, o[k]])); return norm(a) === norm(b); };
+function entryProblem(uid, p, before, after, alsoNew = new Set()) {   // -> what's wrong in plain words, or null
+  const s = segs(p);
+  if (s[0] !== 'expenses' || s.length !== 2 || after == null) return null;
+  const fresh = before == null, pay = after.kind === 'payment';
+  if (after.kind !== 'expense' && !pay) return fresh || before.kind !== after.kind ? 'An entry is either an expense or a payment.' : null;
+  const changed = fresh || before.kind !== after.kind || before.amount !== after.amount || (pay
+    ? before.from !== after.from || before.to !== after.to || (before.confirmed === false) !== (after.confirmed === false)
+    : before.paidBy !== after.paidBy || !sameJson(before.split, after.split));
+  if (!changed) return null;
+  const gid = after.groupId || null;
+  const known = id => typeof id === 'string' && !!id && (gid ? db.docs[`groups/${gid}/members/${id}`] != null || alsoNew.has(`groups/${gid}/members/${id}`) : !!users.users[id]);
+  const was = new Set(fresh ? [] : [before.paidBy, before.from, before.to, ...Object.keys(before.split || {})]);
+  const who = id => known(id) || was.has(id);   // someone already on the entry may stay, even if they have since left
+  if (!Number.isSafeInteger(after.amount) || Math.abs(after.amount) > 1e11) return 'The amount has to be a whole number of cents.';
+  if (fresh && after.addedBy != null && after.addedBy !== uid) return 'An entry is logged under the person who adds it.';
+  if (pay) {
+    if (after.amount <= 0) return 'A payment has to be more than zero.';
+    if (!who(after.from) || !who(after.to)) return gid ? 'Both people in a payment have to be in the group.' : 'Both people in a payment need an account.';
+    if (after.from === after.to) return 'A payment goes from one person to another.';
+    // Only the person who was paid can say the money arrived. Someone without an account can't confirm, so theirs counts right away.
+    const nowCounts = after.confirmed !== false && (fresh || before.confirmed === false || before.amount < after.amount);
+    if (nowCounts && users.users[after.to] && after.to !== uid) return `Only ${nameFor(after.to)} can confirm they got this payment.`;
+    return null;
+  }
+  if (after.status === 'needs_amount' && !after.amount && !Object.keys(after.split || {}).length) return who(after.paidBy) ? null : 'The person who pays has to be in the group.';
+  const split = after.split;
+  if (!split || typeof split !== 'object' || Array.isArray(split)) return 'An expense needs a share for at least one person.';
+  if (!who(after.paidBy)) return gid ? 'The person who paid has to be in the group.' : 'The person who paid needs an account.';
+  let sum = 0;
+  for (const [id, c] of Object.entries(split)) {
+    if (!Number.isSafeInteger(c) || (after.amount >= 0 ? c < 0 : c > 0)) return 'Each share has to be a whole number of cents.';
+    if (!who(id)) return gid ? 'Everyone sharing an expense has to be in the group.' : 'Everyone sharing an expense needs an account.';
+    sum += c;
+  }
+  if (sum !== after.amount) return 'The shares don’t add up to the total.';
+  return null;
 }
 
 // ---------- live updates ----------
@@ -292,6 +375,21 @@ function backup() {
   for (const f of [USERS_FILE, PUSH_FILE]) try { JSON.parse(fs.readFileSync(f, 'utf8')); fs.copyFileSync(f, f + '.bak'); } catch {}
   pruneSessions();
   prunePhotos();
+  copyOut();
+}
+// The copy that survives this laptop's disk: today's full zip in BACKUP_COPY_DIR, if it isn't there yet.
+const copyState = { at: null, error: null };
+function copyOut(force) {
+  if (!BACKUP_COPY_DIR) return null;
+  try {
+    fs.mkdirSync(BACKUP_COPY_DIR, { recursive: true });
+    const mine = () => fs.readdirSync(BACKUP_COPY_DIR).filter(f => /^split-it-backup-\d{4}-\d\d-\d\d\.zip$/.test(f)).sort();
+    const file = path.join(BACKUP_COPY_DIR, `split-it-backup-${new Date().toISOString().slice(0, 10)}.zip`);
+    if (force || !fs.existsSync(file)) { const tmp = file + '.part'; fs.writeFileSync(tmp, backupZip(), { mode: 0o600 }); fs.renameSync(tmp, file); }
+    const all = mine(); for (const f of all.slice(0, Math.max(0, all.length - KEEP_COPIES))) fs.unlinkSync(path.join(BACKUP_COPY_DIR, f));
+    copyState.at = fs.statSync(path.join(BACKUP_COPY_DIR, mine().pop())).mtimeMs; copyState.error = null;
+  } catch (e) { copyState.error = e.code === 'ENOENT' || e.code === 'EACCES' || e.code === 'EROFS' ? `Can’t write to ${BACKUP_COPY_DIR}. Is the drive plugged in?` : e.message; console.error('Backup copy:', e.message); }
+  return copyState;
 }
 const backupList = () => fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith('.json')).sort().reverse()
   .map(f => { const st = fs.statSync(path.join(BACKUP_DIR, f)); return { file: f, bytes: st.size, at: st.mtimeMs }; });
@@ -372,6 +470,26 @@ function restoreZip(buf) {
   return { docs: Object.keys(db.docs).length, users: nextUsers ? Object.keys(nextUsers.users).length : null, photos };
 }
 
+// ---------- is there a newer Split it? ----------
+// Asked only when the owner opens their page, at most twice a day. It reads the public release list on GitHub
+// and sends nothing about this house. UPDATE_CHECK=off turns it off.
+const RELEASES_URL = process.env.RELEASES_URL || 'https://api.github.com/repos/sherrypanaich/split-it/releases/latest';
+const newerThan = (a, b) => { const x = String(a).replace(/^v/, '').split('.').map(Number), y = String(b).replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); } return false; };
+let release = { at: 0, data: { current: VERSION, latest: null, newer: false, url: null } };
+async function latestRelease() {
+  if ((process.env.UPDATE_CHECK || '').toLowerCase() === 'off') return { ...release.data, off: true };
+  if (Date.now() - release.at < 12 * 3600e3) return release.data;
+  release.at = Date.now();
+  try {
+    const r = await fetch(RELEASES_URL, { headers: { 'User-Agent': 'split-it', Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(6000) });
+    const d = r.ok ? await r.json() : null;
+    if (d && /^v?\d+\.\d+\.\d+$/.test(d.tag_name || '')) release.data = { current: VERSION, latest: String(d.tag_name).replace(/^v/, ''), newer: newerThan(d.tag_name, VERSION),
+      url: /^https:\/\/github\.com\//.test(d.html_url || '') ? d.html_url : null, name: String(d.name || '').slice(0, 120) };
+  } catch {}
+  return release.data;
+}
+
 // ---------- phone notifications ----------
 let pushKeys = push.loadKeys(PUSH_KEYS_FILE);
 const nudges = new Map();
@@ -397,6 +515,14 @@ const activeMembers = gid => { const prefix = `groups/${gid}/members/`;
 async function tellPeople(uid, ops, before) {
   for (const o of ops) {
     const s = segs(o.path), prev = before[o.path], d = db.docs[o.path];
+    // a chore swap: whoever now has the turn hears about it
+    if (s[0] === 'chores' && s.length === 2 && d && prev && d.swap && d.swap.at !== prev.swap?.at && Array.isArray(d.order) && d.order.length) {
+      const who = d.order[(d.turn || 0) % d.order.length];
+      const what = d.title || 'A chore', other = d.swap.from;
+      if (who && who !== uid && users.users[who]) await notify([who], { title: `${nameFor(uid)} swapped a chore with you`, body: `${what} is yours this time${d.due ? ', due ' + d.due : ''}. ${nameFor(other)} takes your turn instead.`, tag: 'chore-' + s[1] });
+      else if (other && other !== uid && users.users[other]) await notify([other], { title: `${nameFor(uid)} took your turn`, body: `${what} is theirs this time. You take their turn instead.`, tag: 'chore-' + s[1] });
+      continue;
+    }
     if (s[0] !== 'expenses' || !d) continue;
     const fresh = o.op === 'set' && prev == null;
     if (fresh && s.length === 2 && d.kind === 'payment' && d.confirmed === false && d.to && d.to !== uid) {
@@ -744,6 +870,14 @@ const photoCount = new Map();   // uid|day -> uploads today
 
 const isOwner = uid => !!users.users[uid]?.owner;
 async function handle(req, res) {
+  // Laptop commands (node server.js set-password NAME ...) reach the running app here. Only from this computer,
+  // never through a tunnel or proxy, and only with the secret from data/server.lock.
+  if (req.url === '/api/local/cli') {
+    const tok = Buffer.from(String(req.headers['x-local-token'] || '')), want = Buffer.from(localToken || '');
+    const direct = isLocal(req.socket.remoteAddress) && !req.headers['x-forwarded-for'] && !req.headers['x-forwarded-host'];
+    if (req.method !== 'POST' || !direct || !want.length || tok.length !== want.length || !crypto.timingSafeEqual(tok, want)) return send(res, 404, { error: 'not found' });
+    return send(res, 200, localCommand(await readBody(req)));
+  }
   if (await mcp.handle(req, res)) return;   // AI assistant connector (mcp.js)
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
@@ -759,15 +893,16 @@ async function handle(req, res) {
   }
   if (p === '/login' && req.method === 'GET') return file(res, 'login.html');
   if (p === '/api/login' && req.method === 'POST') {
-    const ip = clientIp(req), m = misses.get(ip);
-    if (m && m.n >= 5 && Date.now() - m.at < 15 * 60e3) return send(res, 429, { error: 'Too many tries. Wait 15 minutes.' });
     const { name, password } = await readBody(req);
     const found = findUser(name || '');
+    const wait = tooManyTries(req, found && found[0]); if (wait) return send(res, 429, { error: wait });
     if (!found || !checkPw(String(password || ''), found[1])) {
-      misses.set(ip, { n: (m && Date.now() - m.at < 15 * 60e3 ? m.n : 0) + 1, at: Date.now() });
+      noteMiss(req, found && found[0]);
       return send(res, 401, { error: 'That name and password don’t match.' });
     }
-    misses.delete(ip);
+    misses.delete(clientIp(req));
+    // a sign-in code is on for this person: the password was step one, the code is step two (accounts.js)
+    if (accounts.needsCode(found[0])) return send(res, 200, { need: 'code', ticket: accounts.codeTicket(found[0]) });
     const token = crypto.randomBytes(32).toString('hex');
     for (const [t, s] of Object.entries(users.sessions)) if (s.exp < Date.now()) delete users.sessions[t];
     users.sessions[token] = { uid: found[0], exp: Date.now() + SESSION_DAYS * 864e5 };
@@ -858,13 +993,13 @@ async function handle(req, res) {
       const pushOn = id => (pushes.subs[id] || []).length;
       const sessions = {}; for (const s of Object.values(users.sessions)) if (s.exp > Date.now()) sessions[s.uid] = (sessions[s.uid] || 0) + 1;
       const people = Object.entries(users.users).map(([id, u]) => ({ id, name: u.name, nickname: db.docs['people/' + id]?.nickname || null, owner: !!u.owner, email: u.emailVerified ? u.email : null,
-        hasPassword: !!u.hash, google: !!u.google, createdAt: u.createdAt || null, lastSeen: u.lastSeen || null, push: pushOn(id), sessions: sessions[id] || 0, mcp: mcp.connected(id) }));
+        hasPassword: !!u.hash, google: !!u.google, code: accounts.needsCode(id), createdAt: u.createdAt || null, lastSeen: u.lastSeen || null, push: pushOn(id), sessions: sessions[id] || 0, mcp: mcp.connected(id) }));
       let photos = 0, photoBytes = 0; for (const f of fs.readdirSync(PHOTO_DIR)) { try { photoBytes += fs.statSync(path.join(PHOTO_DIR, f)).size; photos++; } catch {} }
       let disk = null; try { const st = fs.statfsSync(DATA_DIR); disk = { free: st.bavail * st.bsize, total: st.blocks * st.bsize }; } catch {}
       const invites = Object.values(users.invites || {}).filter(v => !v.used && v.exp > Date.now()).length;
       return send(res, 200, { people, backups: backupList().slice(0, 40), invites,
         health: { version: VERSION, node: process.version, uptime: Date.now() - STARTED, dbBytes: fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size : 0, docs: Object.keys(db.docs).length,
-          photos, photoBytes, disk, lastBillRun, lastBackupAt, remindHour: REMIND_HOUR, publicUrl: process.env.PUBLIC_URL || null, email: !!process.env.RESEND_API_KEY, google: !!process.env.GOOGLE_CLIENT_ID, listeners: listeners.size, dataDir: DATA_DIR } });
+          photos, photoBytes, disk, lastBillRun, lastBackupAt, remindHour: REMIND_HOUR, copyDir: BACKUP_COPY_DIR, copyAt: copyState.at, copyError: copyState.error, publicUrl: process.env.PUBLIC_URL || null, email: !!process.env.RESEND_API_KEY, google: !!process.env.GOOGLE_CLIENT_ID, listeners: listeners.size, dataDir: DATA_DIR } });
     }
     if (p === '/api/admin/reset-link' && req.method === 'POST') {
       const { id } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
@@ -893,6 +1028,16 @@ async function handle(req, res) {
       const { id } = await readBody(req);
       return send(res, 200, { ok: true, sessions: endSessions(id, { assistants: true }) });
     }
+    if (p === '/api/admin/code-off' && req.method === 'POST') {   // someone lost the phone with their authenticator app
+      const { id } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
+      return send(res, 200, { ok: true, was: accounts.codeOff(id) });
+    }
+    if (p === '/api/admin/copy-now' && req.method === 'POST') {
+      if (!BACKUP_COPY_DIR) return send(res, 400, { error: 'No second backup place is set. Add BACKUP_COPY_DIR to split-it.env and restart.' });
+      const st = copyOut(true);
+      return st.error ? send(res, 500, { error: st.error }) : send(res, 200, { ok: true, at: st.at });
+    }
+    if (p === '/api/admin/update') return send(res, 200, await latestRelease());
     if (p === '/api/admin/backup') {
       const stamp = new Date().toISOString().slice(0, 10);
       return out(res, 200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="split-it-backup-${stamp}.zip"`, 'Cache-Control': 'no-store' }, backupZip());
@@ -950,6 +1095,8 @@ async function handle(req, res) {
       if (o.op === 'update' && db.docs[o.path] == null) return send(res, 404, { error: 'not found: ' + o.path });
       const after = o.op === 'set' ? o.data : o.op === 'update' ? { ...db.docs[o.path], ...o.data } : undefined;
       if (!canWrite(uid, o.path, after)) return send(res, 403, { error: 'not allowed' });
+      const wrong = entryProblem(uid, o.path, db.docs[o.path], after, new Set(ops.filter(x => x.op === 'set').map(x => x.path)));
+      if (wrong) return send(res, 422, { error: wrong });
     }
     const before = Object.fromEntries(ops.map(o => [o.path, db.docs[o.path]]));
     for (const o of ops) {
@@ -974,21 +1121,25 @@ async function handle(req, res) {
   send(res, 404, { error: 'not found' });
 }
 
-const accounts = require('./accounts')({ users: () => users, saveUsers, endSessions, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
-  setCookie, cookies, clientIp, misses, tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS });
+const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it.env', cookieName: 'hs', tagline: 'by Budget it',
+  users: () => users, saveUsers, endSessions, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
+  setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS });
 
 // AI assistant connector (Muse, Claude...): see mcp.js
 const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, allDebts, sharedEntries, netOf,
-  nameFor, cad, segs, secure, findUser, tooManyTries, checkLogin });
+  nameFor, cad, segs, secure, findUser, tooManyTries, checkLogin, noteMiss, computeSplit, billDate, billNextKey, billFirstKey, simplified, pairwiseOf, version: VERSION,
+  needsCode: uid => accounts.needsCode(uid), checkCode: (uid, code) => accounts.checkCode(uid, code) });
 
 // The split engine and balance rules, for the tests (node --test test/*.test.js).
-module.exports = { splitEqual, splitShares, itemsSplit, computeSplit, netOf, pairwiseOf, simplified, billDate, billNextKey, billFirstKey, billDueOn, zipWrite, zipRead, crc32 };
+module.exports = { splitEqual, splitShares, itemsSplit, computeSplit, netOf, pairwiseOf, simplified, billDate, billNextKey, billFirstKey, billDueOn, zipWrite, zipRead, crc32, newerThan };
 
 if (require.main === module) {
   if (process.argv[2]) {
     cli(process.argv.slice(2));
   } else {
     if (!Object.keys(users.users).length) console.log('No users yet. Add one with: node server.js add-user YOURNAME');
+    if (+process.versions.node.split('.')[0] < 22) console.log(`Heads-up: this is Node ${process.version}. Split it is tested on Node 22 and 24; older ones no longer get security fixes.`);
+    claimLock(); process.on('exit', dropLock);
     backup(); setInterval(backup, 60 * 60e3);
     setInterval(() => billReminders().catch(e => console.error(e)), 10 * 60e3); setTimeout(() => billReminders().catch(e => console.error(e)), 5000);
     setInterval(() => { for (const res of listeners.keys()) res.write(': ping\n\n'); }, 25000);

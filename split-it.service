@@ -1,0 +1,19 @@
+[Unit]
+Description=Split it
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Expects the app in ~/split-it. Change both paths below if you put it elsewhere.
+# Settings (addresses, email, backups) go in split-it.env next to server.js, not here.
+WorkingDirectory=%h/split-it
+ExecStart=/usr/bin/env node %h/split-it/server.js
+Environment=PORT=8080
+Restart=always
+RestartSec=5
+# The app only needs its own folder.
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

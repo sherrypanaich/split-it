@@ -109,6 +109,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
   <p>Sign in to let it see your balances and expenses and add expenses for you in Split it.</p>
   <label for="n">Name</label><input id="n" name="name" autocomplete="username" required>
   <label for="pw">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required>
+  <label for="cd">Sign-in code <span style="font-weight:400">(only if you turned one on)</span></label><input id="cd" name="code" inputmode="numeric" autocomplete="one-time-code">
   <button>Sign in and allow</button>${err ? `<p class="err" role="alert">${esc(err)}</p>` : ''}</form>`);
   }
 
@@ -121,7 +122,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       return json(res, 200, {
         issuer: b, authorization_endpoint: b + '/oauth/authorize', token_endpoint: b + '/oauth/token', registration_endpoint: b + '/oauth/register',
         response_types_supported: ['code'], grant_types_supported: ['authorization_code', 'refresh_token'], code_challenge_methods_supported: ['S256'],
-        token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'], scopes_supported: ['house-split']
+        token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'], scopes_supported: ['split-it']
       });
     if (p === '/oauth/register' && req.method === 'POST') {
       const m = await readForm(req);
@@ -148,6 +149,10 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       if (wait) return authorizeForm(res, q, c.name, wait);
       const uid = h.checkLogin(req, q.name, q.password);
       if (!uid) return authorizeForm(res, q, c.name, 'That name and password don’t match.');
+      if (h.needsCode && h.needsCode(uid)) {
+        const wait2 = h.tooManyTries(req, uid); if (wait2) return authorizeForm(res, q, c.name, wait2);
+        if (!h.checkCode(uid, q.code)) { h.noteMiss(req, uid); return authorizeForm(res, q, c.name, 'Enter the 6-digit code from your authenticator app.'); }
+      }
       tidy();
       const code = rand();
       store.codes[sha(code)] = { uid, client: q.client_id, redirect_uri: q.redirect_uri, challenge: q.code_challenge, exp: Date.now() + 10 * 60e3 };
@@ -179,7 +184,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       tidy();
       const access = issue(uid, m.client_id, 'access', ACCESS_DAYS), refresh = issue(uid, m.client_id, 'refresh', REFRESH_DAYS);
       saveStore();
-      return json(res, 200, { access_token: access, token_type: 'Bearer', expires_in: ACCESS_DAYS * 86400, refresh_token: refresh, scope: 'house-split' });
+      return json(res, 200, { access_token: access, token_type: 'Bearer', expires_in: ACCESS_DAYS * 86400, refresh_token: refresh, scope: 'split-it' });
     }
     return json(res, 404, { error: 'not_found' });
   }
@@ -277,7 +282,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
           : `${e.date}: ${e.title || 'Expense'} ${cad(e.amount)}, paid by ${label(e.paidBy, uid)}, your share ${cad((e.split || {})[uid] || 0)} [${gname(e.groupId)}]`).join('\n');
       } },
     { name: 'add_expense', title: 'Add an expense',
-      description: 'Adds a shared expense to Split it, split equally. Give either a group name, or one person (for a one-on-one expense). By default the signed-in person paid and everyone active in the group (or both people) shares it. Confirm the details with the user before calling. Amounts are Canadian dollars.',
+      description: 'Adds a shared expense to Split it. Give either a group name, or one person (for a one-on-one expense). By default the signed-in person paid and everyone active in the group (or both people) shares it equally. For an uneven split give shares (weights, like 2 for a couple and 1 for a single) or exact_amounts (dollars per person, adding up to the total). Confirm the details with the user before calling. Amounts are Canadian dollars.',
       inputSchema: { type: 'object', additionalProperties: false, required: ['title', 'amount'], properties: {
         title: { type: 'string', description: 'What it was for, e.g. "Groceries"' },
         amount: { type: 'number', description: 'Total in dollars, e.g. 54.20' },
@@ -285,6 +290,8 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         with_person: { type: 'string', description: 'For a one-on-one expense (no group): the other person’s name.' },
         paid_by: { type: 'string', description: 'Who paid. Defaults to the signed-in person.' },
         split_between: { type: 'array', items: { type: 'string' }, description: 'Names of who shares it. Defaults to everyone in the group, or both people. Include "me" for the signed-in person.' },
+        shares: { type: 'object', additionalProperties: { type: 'number' }, description: 'Uneven split by weight: name to weight, e.g. {"me": 2, "Alex": 1}. Use instead of split_between.' },
+        exact_amounts: { type: 'object', additionalProperties: { type: 'number' }, description: 'Uneven split by dollars: name to amount, e.g. {"me": 30, "Alex": 24.20}. Must add up to the total. Use instead of split_between.' },
         category: { type: 'string', enum: CATS },
         date: { type: 'string', description: 'YYYY-MM-DD, defaults to today' },
         note: { type: 'string' } } },
@@ -306,14 +313,27 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         const who = n => { const r = pick(n, pool); if (r.err) throw new Error(r.err); return r.id === '__me__' ? uid : r.id; };
         const paidBy = a.paid_by ? who(a.paid_by) : uid;
         if (!pool.includes(paidBy)) throw new Error('You’re not an active member of that group.');
-        const ids = [...new Set(a.split_between?.length ? a.split_between.map(who) : pool)];
-        if (!g && ids.some(id => !pool.includes(id))) throw new Error('A one-on-one expense can only be split between the two of you.');
-        const split = splitEqual(amount, ids);
         const id = 'e' + rand(6).replace(/[^A-Za-z0-9]/g, '') + Date.now().toString(36).slice(-3);
-        save(uid, id, { kind: 'expense', title, amount, paidBy, split, splitMode: 'equal', splitInput: { ids }, category: CATS.includes(a.category) ? a.category : 'other',
+        const byName = (o, f) => { const out = {}; for (const [n, v] of Object.entries(o)) { const x = f(Number(v)); if (x > 0) out[who(n)] = (out[who(n)] || 0) + x; } return out; };
+        let ids, split, splitMode = 'equal', splitInput, how = 'split equally between';
+        if (a.shares && Object.keys(a.shares).length && a.exact_amounts && Object.keys(a.exact_amounts).length) throw new Error('Give shares or exact_amounts, not both.');
+        if (a.exact_amounts && Object.keys(a.exact_amounts).length) {
+          const exact = byName(a.exact_amounts, v => Math.round(v * 100)), sum = Object.values(exact).reduce((t, v) => t + v, 0);
+          if (sum !== amount) throw new Error(`Those amounts add up to ${cad(sum)}, but the total is ${cad(amount)}.`);
+          split = exact; ids = Object.keys(exact); splitMode = 'exact'; splitInput = { exact: { ...exact } }; how = 'split between';
+        } else if (a.shares && Object.keys(a.shares).length) {
+          const shares = byName(a.shares, v => Math.round(v * 100) / 100);
+          if (!Object.keys(shares).length) throw new Error('Give each person a share above zero.');
+          split = h.computeSplit(amount, 'shares', { shares }, id); ids = Object.keys(split); splitMode = 'shares'; splitInput = { shares }; how = 'split by shares between';
+        } else {
+          ids = [...new Set(a.split_between?.length ? a.split_between.map(who) : pool)];
+          split = splitEqual(amount, ids); splitInput = { ids };
+        }
+        if (!g && ids.some(id => !pool.includes(id))) throw new Error('A one-on-one expense can only be split between the two of you.');
+        save(uid, id, { kind: 'expense', title, amount, paidBy, split, splitMode, splitInput, category: CATS.includes(a.category) ? a.category : 'other',
           date, note: String(a.note || '').slice(0, 200), orig: null, photo: null, people: [...new Set([paidBy, ...ids])],
           groupId: g ? g.id : null, createdAt: Date.now(), addedBy: uid, via: 'assistant' });
-        return `Added "${title}" ${cad(amount)}${g ? ' in ' + g.name : ' with ' + nameOf(pool[1])}, paid by ${label(paidBy, uid)}, split equally between ${ids.map(i => label(i, uid)).join(', ')} (${ids.map(i => cad(split[i])).join(' / ')}).`;
+        return `Added "${title}" ${cad(amount)}${g ? ' in ' + g.name : ' with ' + nameOf(pool[1])}, paid by ${label(paidBy, uid)}, ${how} ${ids.map(i => label(i, uid)).join(', ')} (${ids.map(i => cad(split[i])).join(' / ')}).`;
       } },
     { name: 'record_payment', title: 'Record a payment',
       description: 'Records that the signed-in person paid someone back (for example by e-Transfer). If the other person uses the app, they confirm it there. Confirm with the user before calling.',
@@ -332,6 +352,52 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         const id = 'p' + rand(6).replace(/[^A-Za-z0-9]/g, '') + Date.now().toString(36).slice(-3);
         save(uid, id, { kind: 'payment', from: uid, to, amount, date: today(), createdAt: Date.now(), addedBy: uid, confirmed, people: [uid, to], groupId: g ? g.id : null, via: 'assistant' });
         return `Recorded: you paid ${nameOf(to)} ${cad(amount)}${g ? ' for ' + g.name : ''}.${confirmed ? '' : ` ${nameOf(to)} will be asked to confirm it in Split it.`}`;
+      } },
+    { name: 'settle_up_plan', title: 'Who should pay whom',
+      description: 'Works out the payments that would settle a Split it group: who should pay whom, and how much. It only suggests; nothing is recorded. Use record_payment after someone has actually paid.',
+      inputSchema: { type: 'object', additionalProperties: false, required: ['group'], properties: { group: { type: 'string', description: 'Group name' } } },
+      annotations: { readOnlyHint: true },
+      run(uid, a) {
+        const r = findGroup(uid, a.group); if (r.err) throw new Error(r.err);
+        const list = h.sharedEntries().filter(e => e.groupId === r.g.id);
+        const plan = r.g.simplify === false ? h.pairwiseOf(list) : h.simplified(h.netOf(list));
+        if (!plan.length) return `${r.g.name} is all square. Nobody owes anything.`;
+        const waiting = list.filter(e => e.kind === 'payment' && e.confirmed === false);
+        return `To settle ${r.g.name}:\n- ${plan.map(p => `${label(p.from, uid) === 'you' ? 'You pay' : nameOf(p.from) + ' pays'} ${label(p.to, uid)} ${cad(p.amount)}`).join('\n- ')}`
+          + (waiting.length ? `\n${waiting.length} payment${waiting.length === 1 ? ' is' : 's are'} recorded but not confirmed yet, so ${waiting.length === 1 ? 'it isn’t' : 'they aren’t'} counted above.` : '');
+      } },
+    { name: 'list_bills', title: 'Bills coming up',
+      description: 'Lists the repeating bills (rent, hydro, internet, subscriptions) in the signed-in person’s Split it groups: amount, who pays, how often and when each is next due. Optionally only one group.',
+      inputSchema: { type: 'object', additionalProperties: false, properties: { group: { type: 'string', description: 'Group name (optional)' } } },
+      annotations: { readOnlyHint: true },
+      run(uid, a) {
+        let gs = groupsOf(uid).filter(g => !g.archived);
+        if (a.group) { const r = findGroup(uid, a.group); if (r.err) throw new Error(r.err); gs = [r.g]; }
+        const gname = Object.fromEntries(gs.map(g => [g.id, g.name])), rows = [];
+        for (const [k, b] of Object.entries(docs())) {
+          if (segs(k)[0] !== 'recurring' || segs(k).length !== 2 || !b || !gname[b.groupId]) continue;
+          const key = b.lastPosted ? h.billNextKey(b, b.lastPosted) : h.billFirstKey(b);
+          rows.push({ due: b.paused || !key ? null : h.billDate(b, key), text: `${b.title || 'Bill'}: ${b.variable ? 'amount changes each time' : cad(b.amount)}, ${b.every === 'week' ? 'weekly' : b.every === 'year' ? 'yearly' : 'monthly'}, ${b.paidBy ? label(b.paidBy, uid) + (b.paidBy === uid ? ' pay' : ' pays') : 'nobody set to pay'} [${gname[b.groupId]}]` });
+        }
+        if (!rows.length) return 'No repeating bills are set up.';
+        rows.sort((x, y) => (x.due || '9999').localeCompare(y.due || '9999'));
+        return rows.map(x => `${x.due ? 'Next due ' + x.due : 'Paused'}: ${x.text}`).join('\n');
+      } },
+    { name: 'month_summary', title: 'A month in a group',
+      description: 'Sums up one month of spending in a Split it group: the total, the signed-in person’s share, what they paid, spending by category and the biggest expenses. Defaults to the current month.',
+      inputSchema: { type: 'object', additionalProperties: false, required: ['group'], properties: { group: { type: 'string', description: 'Group name' }, month: { type: 'string', description: 'YYYY-MM, defaults to this month' } } },
+      annotations: { readOnlyHint: true },
+      run(uid, a) {
+        const r = findGroup(uid, a.group); if (r.err) throw new Error(r.err);
+        const ym = a.month || today().slice(0, 7); if (!/^\d{4}-\d\d$/.test(ym)) throw new Error('Month must look like 2026-11.');
+        const list = h.sharedEntries().filter(e => e.groupId === r.g.id && e.kind !== 'payment' && (e.date || '').startsWith(ym));
+        if (!list.length) return `Nothing was spent in ${r.g.name} in ${ym}.`;
+        const total = list.reduce((t, e) => t + e.amount, 0), mine = list.reduce((t, e) => t + ((e.split || {})[uid] || 0), 0), paid = list.filter(e => e.paidBy === uid).reduce((t, e) => t + e.amount, 0);
+        const cats = {}; for (const e of list) cats[e.category || 'other'] = (cats[e.category || 'other'] || 0) + e.amount;
+        const top = [...list].sort((x, y) => y.amount - x.amount).slice(0, 3);
+        return `${r.g.name} in ${ym}: ${cad(total)} across ${list.length} expense${list.length === 1 ? '' : 's'}. Your share was ${cad(mine)} and you paid ${cad(paid)}.`
+          + `\nBy category: ${Object.entries(cats).sort((x, y) => y[1] - x[1]).map(([c, v]) => `${c} ${cad(v)}`).join(', ')}.`
+          + `\nBiggest: ${top.map(e => `${e.title || 'Expense'} ${cad(e.amount)}`).join(', ')}.`;
       } },
     { name: 'delete_last_expense', title: 'Undo my last entry',
       description: 'Removes the most recent expense or payment the signed-in person added through an assistant in the last 10 minutes, for when the amount or the people were wrong. Older entries stay; fix those in the app.',
@@ -360,7 +426,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     if (method === 'initialize') return ok({
       protocolVersion: VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : VERSIONS[1],
       capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: 'house-split', title: 'Split it by Budget it', version: '2.0.0' },
+      serverInfo: { name: 'split-it', title: 'Split it by Budget it', version: h.version || '2.2.0' },
       instructions: 'Split it tracks shared house expenses between housemates, in Canadian dollars. Tools act as the person who signed in ("you"). Before adding an expense or payment, check the details with the user.'
     });
     if (method === 'ping') return ok({});

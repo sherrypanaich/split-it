@@ -1,5 +1,8 @@
 # docker compose up -d
 # Then: docker compose exec split-it node server.js add-user YOURNAME
+#
+# Coming from v2.1? The app no longer runs as root inside the container, so hand the data over once:
+#   docker compose run --rm --user root split-it chown -R node:node /data
 services:
   split-it:
     build: .
@@ -9,6 +12,11 @@ services:
       - "8080:8080"
     volumes:
       - split-it-data:/data
+      # A second place for backups (a USB drive or a synced folder on the host). Uncomment both lines marked "copy".
+      # - /path/on/this/computer:/backup-copy          # copy
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     environment:
       # Fill these in, or mount a split-it.env file at /app/split-it.env
       - PUBLIC_URL=
@@ -17,5 +25,6 @@ services:
       - GOOGLE_CLIENT_ID=
       - GOOGLE_CLIENT_SECRET=
       - REMIND_HOUR=9
+      # - BACKUP_COPY_DIR=/backup-copy                 # copy
 volumes:
   split-it-data:
