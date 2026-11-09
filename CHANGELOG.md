@@ -23,7 +23,7 @@
 - "Yes, got them all" when three or more payments are waiting for you to confirm.
 - A "What's new" card on Home after an update, shown once.
 - Quick add understands money coming in: "refund 20 from costco" or "sold the couch 90" opens with Money coming in turned on.
-- Your AI assistant can do more: split by shares or exact amounts, tell you who should pay whom, list the bills coming up, and sum up a month.
+- Your AI assistant can do more: split by shares or exact amounts, tell you who should pay whom, list the bills coming up, and sum up a month. After adding an expense it says what your own share is, which Budget it uses to count only your share in your budget.
 
 ### Improved
 - Laptop commands (`add-user`, `set-password`, `remove-user`) now work while the app is running and take effect right away. No more restart.
