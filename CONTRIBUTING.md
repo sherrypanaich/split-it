@@ -42,4 +42,4 @@ Versions follow `vMAJOR.MINOR.PATCH`: a patch for fixes only, a minor for new fe
 
 1. Add a section to the top of `CHANGELOG.md`, headed `## vX.Y.Z · Month D, YYYY`, with a bold one-line headline, then Highlights, New, Improved, Fixed, Security and Known issues (leave out any that are empty).
 2. Set `VERSION` in `server.js` to the same number.
-3. After the pull request is merged, tag main: `git tag vX.Y.Z && git push origin vX.Y.Z`. The Release workflow publishes a GitHub Release from that changelog section.
+3. After the pull request is merged, tag main (`git tag vX.Y.Z && git push origin vX.Y.Z`), or run the Release workflow from the Actions tab with the version. It publishes a GitHub Release from that changelog section.
