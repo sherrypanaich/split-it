@@ -401,6 +401,7 @@ test('an assistant can do what its person can, and nothing more', async () => {
   const before = (await ben.col('expenses')).data.docs.length;
   const a = await tool(key, 'add_expense', { title: 'Hydro', amount: 90, group: 'Maple St', shares: { Ana: 2, Ben: 1 } });
   assert.ok(!a.isError, a.text);
+  assert.match(a.text, /Your share: \$30\.00\.$/, 'the answer says what your own share is (Budget it reads this)');
   const added = (await ben.col('expenses')).data.docs.map(d => d.data).find(e => e.title === 'Hydro');
   assert.deepStrictEqual([added.amount, added.split[ana.uid], added.split[ben.uid], added.paidBy], [9000, 6000, 3000, ben.uid]);
   assert.strictEqual((await ben.col('expenses')).data.docs.length, before + 1);
@@ -409,6 +410,8 @@ test('an assistant can do what its person can, and nothing more', async () => {
   assert.ok(x.isError, 'exact amounts that do not add up are refused: ' + x.text);
   const y = await tool(key, 'add_expense', { title: 'Paint', amount: 50, group: 'Maple St', exact_amounts: { Ana: 35.5, Ben: 14.5 } });
   assert.ok(!y.isError, y.text);
+  const z = await tool(key, 'add_expense', { title: 'Their taxi', amount: 24, group: 'Maple St', exact_amounts: { Ana: 24 } });
+  assert.match(z.text, /You’re not in this split\.$/, z.text);
 
   const pay = await tool(key, 'record_payment', { to: 'Ana', amount: 12.5, group: 'Maple St' });
   assert.match(pay.text, /confirm/);

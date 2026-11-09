@@ -333,7 +333,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         save(uid, id, { kind: 'expense', title, amount, paidBy, split, splitMode, splitInput, category: CATS.includes(a.category) ? a.category : 'other',
           date, note: String(a.note || '').slice(0, 200), orig: null, photo: null, people: [...new Set([paidBy, ...ids])],
           groupId: g ? g.id : null, createdAt: Date.now(), addedBy: uid, via: 'assistant' });
-        return `Added "${title}" ${cad(amount)}${g ? ' in ' + g.name : ' with ' + nameOf(pool[1])}, paid by ${label(paidBy, uid)}, ${how} ${ids.map(i => label(i, uid)).join(', ')} (${ids.map(i => cad(split[i])).join(' / ')}).`;
+        return `Added "${title}" ${cad(amount)}${g ? ' in ' + g.name : ' with ' + nameOf(pool[1])}, paid by ${label(paidBy, uid)}, ${how} ${ids.map(i => label(i, uid)).join(', ')} (${ids.map(i => cad(split[i])).join(' / ')}). ${split[uid] ? 'Your share: ' + cad(split[uid]) + '.' : 'You’re not in this split.'}`;
       } },
     { name: 'record_payment', title: 'Record a payment',
       description: 'Records that the signed-in person paid someone back (for example by e-Transfer). If the other person uses the app, they confirm it there. Confirm with the user before calling.',
