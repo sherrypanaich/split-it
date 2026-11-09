@@ -47,17 +47,25 @@
       while (queue().length) {
         const [first, ...rest] = queue();
         try { await api('/api/write', { ops: [first] }); setQueue(rest); }
-        catch (e) { if (e.offline) break; console.warn('Dropped a change made offline:', e.message, first); setQueue(rest); }
+        catch (e) {
+          // Not reachable, signed out, or the laptop is busy: keep the change and try again later.
+          if (e.offline || e.code === 'unauthenticated' || e.code === 'unavailable') break;
+          // The server said no for good (not allowed, or the thing is gone): skip it, and say so.
+          console.warn('Skipped a change made offline:', e.message, first); setQueue(rest);
+          window.dispatchEvent(new CustomEvent('hs-dropped', { detail: { message: e.message } }));
+        }
       }
       if (!queue().length) subs.forEach(s => s.refresh());
     } finally { flushing = false; }
   }
   window.addEventListener('online', () => { flush(); subs.forEach(s => s.refresh()); });
   async function write(ops) {
-    try { return await api('/api/write', { ops }); }
+    // While older changes are still waiting, new ones wait behind them, so they reach the laptop in order.
+    const waiting = queue().length > 0;
+    try { if (waiting) throw Object.assign(fail('waiting for older changes', 'unavailable'), { offline: true }); return await api('/api/write', { ops }); }
     catch (e) {
       if (!e.offline) throw e;
-      setQueue([...queue(), ...ops]); offlineNow(true);
+      setQueue([...queue(), ...ops]); if (waiting) flush(); else offlineNow(true);
       // show the change right away, as if the server had confirmed it
       for (const op of ops) for (const s of subs) {
         if (s.path !== parentOf(op.path) || !s.patch) continue;
@@ -90,6 +98,7 @@
       }
     });
     es.addEventListener('reload', () => setTimeout(() => location.reload(), 800));
+    es.addEventListener('refresh', () => subs.forEach(s => s.refresh()));   // joined or left a group
     es.onopen = () => { if (dropped) { dropped = false; subs.forEach(s => s.refresh()); } window.dispatchEvent(new Event('hs-online')); };
     es.onerror = () => { es.close(); es = null; dropped = true; window.dispatchEvent(new Event('hs-offline')); setTimeout(connect, 3000); };
   };

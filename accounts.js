@@ -18,7 +18,10 @@ module.exports = function accounts(h) {
   const { users, saveUsers, docs, saveDb, broadcast, hashPw, findUser, setCookie, cookies, clientIp, misses,
     tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS } = h;
   const env = k => (process.env[k] || '').trim();
-  const RESEND = env('RESEND_API_KEY'), FROM = env('MAIL_FROM') || 'Split it <onboarding@resend.dev>';
+  // Emails carry sign-in links, so they only go out once PUBLIC_URL says where those links point.
+  // Without it a link would be built from whatever address the request claimed to come to.
+  if (env('RESEND_API_KEY') && !env('PUBLIC_URL')) console.error('Emails are off: set PUBLIC_URL in split-it.env to turn them on.');
+  const RESEND = env('PUBLIC_URL') ? env('RESEND_API_KEY') : '', FROM = env('MAIL_FROM') || 'Split it <onboarding@resend.dev>';
   const G_ID = env('GOOGLE_CLIENT_ID'), G_SECRET = env('GOOGLE_CLIENT_SECRET');
   const G_AUTH = env('GOOGLE_AUTH_URL') || 'https://accounts.google.com/o/oauth2/v2/auth';
   const G_TOKEN = env('GOOGLE_TOKEN_URL') || 'https://oauth2.googleapis.com/token';
