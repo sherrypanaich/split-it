@@ -206,6 +206,9 @@ button.row.card{border:1px solid var(--line);border-radius:18px}
 .party{position:fixed;inset:0;z-index:80;display:grid;place-items:center;background:rgba(12,10,24,.45);animation:fadein .15s ease-out}
 .party.out{opacity:0;transition:opacity .35s}
 .party-card{position:relative;width:280px;height:280px;display:grid;place-items:center;animation:popin .45s cubic-bezier(.2,1.6,.4,1)}
+.party-card .coinhop{position:absolute;left:8px;bottom:40px;width:34px;height:34px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#FFF3A6,#FFD23F 55%,#E0A800);border:3px solid #14112A;z-index:3;
+  font:900 18px/28px system-ui;color:#14112A;text-align:center;animation:coinhop .7s cubic-bezier(.3,.7,.4,1) both}
+@keyframes coinhop{0%{transform:translate(0,0) rotate(0) scale(.6);opacity:0}15%{opacity:1}55%{transform:translate(110px,-150px) rotate(300deg) scale(1.1)}100%{transform:translate(230px,0) rotate(720deg) scale(.4);opacity:0}}
 .party-card .burst{position:absolute;inset:0;width:100%;height:100%;animation:spin 6s linear infinite}
 .party-card .portrait{width:130px;height:130px;position:relative;margin-top:-26px}
 .party-card .sfx{position:absolute;bottom:52px;font-size:2.4rem;font-weight:800;letter-spacing:.02em;color:#FF3B5C;-webkit-text-stroke:2px #14112A;text-shadow:3px 3px 0 #14112A;transform:rotate(-6deg)}
@@ -249,6 +252,9 @@ button.row.card{border:1px solid var(--line);border-radius:18px}
 nav.tabs{position:fixed;left:0;right:0;bottom:0;z-index:20;background:color-mix(in srgb,var(--surface) 92%,transparent);
   -webkit-backdrop-filter:blur(18px);backdrop-filter:blur(18px);border-top:1px solid var(--line);padding-bottom:env(safe-area-inset-bottom,0px)}
 nav.tabs .in{max-width:560px;margin:0 auto;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));height:var(--tabh);align-items:center}
+nav.tabs .tab{position:relative}
+nav.tabs .tab .tdot{position:absolute;top:6px;left:calc(50% + 6px);min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--neg,#d33);color:#fff;font-size:.62rem;font-weight:800;line-height:16px;text-align:center;border:1.5px solid var(--edge,#111)}
+@media (min-width:900px){ nav.tabs .tab .tdot{position:static;margin-left:auto} }
 nav.tabs .tab{background:none;border:none;height:100%;display:grid;justify-items:center;align-content:center;gap:3px;font-size:.72rem;font-weight:600;color:var(--muted)}
 nav.tabs .tab svg{width:23px;height:23px}
 nav.tabs .tab[aria-current="page"]{color:var(--accent)}
@@ -276,6 +282,7 @@ textarea.in{resize:vertical;min-height:60px}
 .amount-wrap input{border:none;background:none;font-size:2.3rem;font-weight:800;letter-spacing:-.03em;width:100%;min-width:0;padding:4px 6px}
 .amount-wrap input:focus{outline:none}
 .amount-wrap:focus-within,.in:focus{border-color:var(--accent);outline:none}
+.payrow{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:10px}
 .split{background:var(--surface);border:1px solid var(--line);border-radius:16px;margin-top:10px}
 .srow{display:flex;gap:10px;align-items:center;padding:10px 12px;border-top:1px solid var(--line);min-height:52px}
 .srow:first-child{border-top:none}
@@ -1033,7 +1040,7 @@ function celebrate(msg, full){
   const bits = Array.from({length:36},(_,i)=>`<i style="left:${50+Math.cos(i)*8}%;background:${colors[i%colors.length]};--dx:${Math.round((Math.random()-.5)*340)}px;--dy:${Math.round(-140-Math.random()*240)}px;--r:${Math.round(Math.random()*720)}deg;animation-delay:${(Math.random()*.15).toFixed(2)}s"></i>`).join('');
   const el = document.createElement('div'); el.className = 'party'; el.setAttribute('role','status');
   el.innerHTML = `<div class="confetti">${bits}</div><div class="party-card${full?' shake':''}"><svg class="burst" viewBox="0 0 300 300" aria-hidden="true"><path d="${BURST(300,300,18,.78)}" fill="#FFD23F" stroke="${INK}" stroke-width="5" stroke-linejoin="round"/></svg>
-    ${lulu('celebrate','huge')}<b class="sfx stamp">${full?'ALL SQUARE!':'PAID!'}</b><span class="msg">${esc(full ? voiceLine('celebrate') : msg)}</span></div>`;
+    <span class="coinhop" aria-hidden="true">$</span>${lulu('celebrate','huge')}<b class="sfx stamp">${full?'ALL SQUARE!':'PAID!'}</b><span class="msg">${esc(full ? voiceLine('celebrate') : msg)}</span></div>`;
   el.onclick = () => el.remove();
   document.body.appendChild(el); setTimeout(()=>el.classList.add('out'), 1900); setTimeout(()=>el.remove(), 2300);
 }
@@ -1113,14 +1120,16 @@ async function write(fn, quiet){
 }
 function openSheet(html, mount){
   if(S.sheetUnsub){ S.sheetUnsub(); S.sheetUnsub=null; } document.querySelectorAll('.toast').forEach(t=>t.classList.add('top'));
+  if(!layer.firstElementChild || layer.firstElementChild.classList.contains('out')) navPush('push', {tab:S.tab, page:S.page, sheet:true});
   layer.innerHTML = `<div class="scrim"><div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>${html}</div></div>`;
   const scrim = layer.firstElementChild;
   scrim.addEventListener('click', e => { if(e.target===scrim) closeSheet(); });
   scrim.querySelectorAll('[data-close]').forEach(b=>b.onclick=closeSheet);
   mount && mount(scrim.querySelector('.sheet'));
 }
-function closeSheet(){ if(S.sheetUnsub){ S.sheetUnsub(); S.sheetUnsub=null; }
+function closeSheet(fromBack){ if(S.sheetUnsub){ S.sheetUnsub(); S.sheetUnsub=null; }
   const sc = layer.firstElementChild; if(!sc) return;
+  if(fromBack !== true && NAV && history.state?.sheet) navPush('replace', {tab:S.tab, page:S.page, sheet:false});
   if(reduceMotion || sc.classList.contains('out')){ layer.innerHTML=''; return; }
   sc.classList.add('out'); setTimeout(() => sc.remove(), 210); }
 document.addEventListener('keydown', e => { if(e.key==='Escape') closeSheet(); });
@@ -1137,12 +1146,41 @@ function streakLine(){
   const n = Math.round((new Date(today()+'T12:00:00') - new Date(since+'T12:00:00'))/864e5);
   return n >= 2 ? `Even for ${n} days. Nobody owes anybody.` : 'Nobody owes anybody.';
 }
+// 7, 30 and 100 days even: the guide says so, once each.
+function milestone(){
+  const since = lsGet('hs-zero-since'); if(!since || S.tab!=='home' || S.page) return;
+  const n = Math.round((new Date(today()+'T12:00:00') - new Date(since+'T12:00:00'))/864e5);
+  const hit = [100, 30, 7].find(m => n >= m && lsGet('hs-ms') !== since+':'+m && !(+String(lsGet('hs-ms')||'').split(':')[1] >= m && String(lsGet('hs-ms')).startsWith(since)));
+  if(!hit) return; lsSet('hs-ms', since+':'+hit);
+  setTimeout(() => guideSay(`${hit} days with nobody owing anybody. Best house ever!`, 'react-up'), 1600);
+}
 function bigMoney(c){ const s = money(Math.abs(c)); const i = s.lastIndexOf('.'); return i<0 ? esc(s) : `${esc(s.slice(0,i))}<span class="cents">${esc(s.slice(i))}</span>`; }
 const amtClass = v => v>0?'pos':v<0?'neg':'mut';
 const owesLine = (v, who) => v>0 ? `${who} owes you` : v<0 ? `you owe ${who}` : 'settled up';
 
 /* ================= routing ================= */
-function go(tab, page){ navDir = page ? 'fwd' : S.page ? 'back' : 'tab'; S.tab = tab; S.page = page||null; S.filter='all'; S.q=''; S.who=''; S.cat=''; S.older=false; render(); scrollTo(0,0); }
+function go(tab, page, fromBack){ navDir = fromBack ? 'back' : page ? 'fwd' : S.page ? 'back' : 'tab';
+  if(!fromBack) navPush(page ? 'push' : 'replace', {tab, page:page||null});
+  S.tab = tab; S.page = page||null; S.filter='all'; S.q=''; S.who=''; S.cat=''; S.older=false; render(); scrollTo(0,0); }
+/* The phone's Back button. On the installed app it used to close Split it. Now each page and sheet
+   is a step in the browser history: Back closes the open sheet, then goes back a page. Only where
+   Split it is the whole window (the laptop app), so the artifact's host page keeps its own history. */
+const NAV = LAPTOP && typeof history !== 'undefined' && !!history.pushState;
+function navPush(how, st){
+  if(!NAV) return;
+  try{ const page = st.page ? JSON.parse(JSON.stringify(st.page)) : null, s = {hs:1, tab:st.tab, page, sheet:!!st.sheet};
+    if(how==='push') history.pushState(s, ''); else history.replaceState(s, ''); }catch(e){}
+}
+if(NAV){
+  try{ if(!history.state?.hs) history.replaceState({hs:1, tab:'home', page:null, sheet:false}, ''); }catch(e){}
+  addEventListener('popstate', ev => {
+    const st = ev.state; if(!st?.hs) return;
+    if(layer.firstElementChild){ closeSheet(true); return; }
+    if(st.sheet){ navPush('replace', {...st, sheet:false}); }
+    if(st.tab !== S.tab || JSON.stringify(st.page||null) !== JSON.stringify(S.page||null)) go(st.tab, st.page, true);
+    else history.back();   // a step that shows the same screen: skip it
+  });
+}
 const ready = () => S.got.people && S.got.groups && S.got.expenses && S.got.priv;
 function render(){
   const tabs = document.getElementById('tabs');
@@ -1156,6 +1194,7 @@ function render(){
   { const netNow = myTotals().net;
     if(netNow === 0){ if(lastNet != null && lastNet !== 0) lsSet('hs-zero-day', today()); if(!lsGet('hs-zero-since')) lsSet('hs-zero-since', today()); }
     else lsSet('hs-zero-since', null);
+    milestone();
     lastNet = netNow; lsSet('hs-char', myChar()); }
   document.getElementById('addBtn').hidden = !canWrite;
   tabs.querySelectorAll('[data-tab]').forEach(b=>b.setAttribute('aria-current', b.dataset.tab===S.tab?'page':'false'));
@@ -1169,9 +1208,23 @@ function render(){
   animateNums(app, false);
   playNav();
   dailyHello();
+  updateBadge();
   runPendingDo();
   const qi = app.querySelector('#quickIn'); if(qi && qv) qi.value = qv;
   if(keep && app.querySelector('#'+keep)){ const el = app.querySelector('#'+keep); el.focus(); if(el.setSelectionRange) el.setSelectionRange(el.value.length, el.value.length); }
+}
+// How many things wait on you (payments to confirm, bills to fill in, chores, new comments):
+// a number on the Home tab, and on the app icon where the phone supports it.
+let lastBadge = -1;
+function updateBadge(){
+  let n = 0; try{ n = needsYou().length; }catch(e){}
+  const tab = document.querySelector('#tabs [data-tab="home"]');
+  if(tab){ let d = tab.querySelector('.tdot'); if(n && !d){ d = document.createElement('span'); d.className = 'tdot'; tab.appendChild(d); }
+    if(d){ d.hidden = !n; d.textContent = n > 9 ? '9+' : String(n); } tab.setAttribute('aria-label', n ? `Home, ${n} thing${n===1?'':'s'} need${n===1?'s':''} you` : 'Home'); }
+  if(n === lastBadge) return;
+  if(lastBadge > 0 && n === 0 && S.tab === 'home' && !S.page) setTimeout(() => guideSay('All caught up. Nothing needs you right now!', 'react-up'), 400);
+  lastBadge = n;
+  try{ if(navigator.setAppBadge) (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(()=>{}); }catch(e){}
 }
 // Money figures roll from the last value shown to the new one. The first time a figure
 // appears it counts up from zero. When a balance changes, it flashes and your guide reacts.
@@ -1430,7 +1483,7 @@ function confirmTap(btn, msg){
   setTimeout(() => { delete btn.dataset.armed; btn.textContent = was; }, 4000); return false;
 }
 // messages handed over in the address, e.g. after Google or an email link
-(() => { const m = location.hash.match(/^#msg=(.+)$/); if(!m) return; history.replaceState(null, '', location.pathname);
+(() => { const m = location.hash.match(/^#msg=(.+)$/); if(!m) return; history.replaceState(history.state, '', location.pathname);
   let text = ''; try{ text = decodeURIComponent(m[1]); }catch(e){} if(text) setTimeout(() => toast(text.slice(0, 200)), 900); })();
 
 /* ================= phone app: install + notifications ================= */
@@ -1667,6 +1720,13 @@ function viewHome(){
   h += `</div></div>`;
   return h;
 }
+// what a filled-in bill covers, in words: "November", "the week of Nov 3", "2026"
+function billPeriod(e){
+  const every = S.recurringRaw.find(r => r._id===e.recurringId)?.every || 'month';
+  if(every==='week') return {unit:'week', label:'the week of '+new Date(e.date+'T12:00').toLocaleDateString('en-CA',{month:'short', day:'numeric'})};
+  if(every==='year') return {unit:'year', label:e.date.slice(0,4)};
+  return {unit:'month', label:monthName(e.date.slice(0,7))};
+}
 function needsYou(gid){
   const out = [], groups = gid ? [S.groups[gid]] : myGroups();
   for(const g of groups){
@@ -1674,7 +1734,7 @@ function needsYou(gid){
       <div class="m">Are they “${esc(nameOf(p))}” who was added before they joined? Linking moves those expenses to their account.</div></div></div>
       <div class="acts"><button class="btn sm primary" data-link="${g.id}|${p}|${a}">Link them</button></div></div>`));
     alive(groupEntries(g.id)).filter(e=>e.status==='needs_amount').forEach(e => out.push(`<div class="todo"><div class="line"><span class="ic">${catIcon(e.category)}</span><div class="body">
-      <div class="t">${esc(e.title)} for ${monthName(e.date.slice(0,7))}</div><div class="m">${gid?'':esc(g.name)+'. '}Needs this month’s amount. ${esc(youOr(e.paidBy))} ${e.paidBy===myUid?'have':'has'} the bill.</div></div></div>
+      <div class="t">${esc(e.title)} for ${billPeriod(e).label}</div><div class="m">${gid?'':esc(g.name)+'. '}Needs this ${billPeriod(e).unit}’s amount. ${esc(youOr(e.paidBy))} ${e.paidBy===myUid?'have':'has'} the bill.</div></div></div>
       ${canWrite?`<div class="acts"><button class="btn sm primary" data-fill="${esc(e._id)}">Enter amount</button></div>`:''}</div>`));
   }
   S.recurringRaw.filter(r => !r.paused && r.paidBy===myUid && (gid ? r.groupId===gid : myGroups().some(g=>g.id===r.groupId))).forEach(r => { const d = nextDue(r);
@@ -1686,7 +1746,7 @@ function needsYou(gid){
       <div class="m">${choreWhen(c.due)}${gid?'':', '+esc(S.groups[c.groupId]?.name||'')}</div></div></div>
       ${canWrite?`<div class="acts"><button class="btn sm primary" data-chore-done="${esc(c._id)}">Done</button></div>`:''}</div>`));
   alive(S.expensesRaw).filter(e=>e.kind==='payment' && e.to===myUid && e.confirmed===false && (!gid || e.groupId===gid)).forEach(e => out.push(`<div class="todo"><div class="line">${av(e.from)}<div class="body">
-      <div class="t">Did you get ${money(e.amount)} from ${esc(nameOf(e.from))}?</div><div class="m">${esc(ctxLabel(e))}. ${esc(nameOf(e.addedBy||e.from))} marked it paid ${whenLabel(e.createdAt)}.</div></div></div>
+      <div class="t">Did you get ${money(e.amount)} from ${esc(nameOf(e.from))}?</div><div class="m">${esc(ctxLabel(e))}. ${esc(nameOf(e.addedBy||e.from))} marked it paid ${whenLabel(e.createdAt)}.${e.note?' “'+esc(e.note)+'”':''}</div></div></div>
       ${canWrite?`<div class="acts"><button class="btn sm primary" data-confirm="${esc(e._id)}" data-ok="1">Yes, got it</button><button class="btn sm" data-confirm="${esc(e._id)}" data-ok="0">No</button></div>`:''}</div>`));
   alive(S.expensesRaw).filter(e => unreadOn(e) && e.people.includes(myUid) && (!gid || e.groupId===gid)).sort(byDate).slice(0,3).forEach(e => out.push(`<div class="todo"><div class="line"><span class="ic">${icon('bubble')}</span><div class="body">
       <div class="t">New comment${unreadOn(e)>1?'s':''} on ${esc(e.title||'an expense')}</div><div class="m">${unreadOn(e)} new${gid?'':', '+esc(ctxLabel(e))}. Tap to read.</div></div></div>
@@ -1707,7 +1767,7 @@ function groupRow(g){
 function viewGroups(){
   const gs = myGroups(true), act = gs.filter(g=>!g.archived), arch = gs.filter(g=>g.archived);
   let h = topBar('Groups', canWrite?`<button class="btn sm primary" id="newGroup">New group</button>`:'');
-  if(!gs.length) return h + `<div class="empty"><strong>No groups yet</strong>A group keeps a shared tab for your house, a trip, a team or anything that repeats.</div>`;
+  if(!gs.length) return h + `<div class="empty with-lulu">${guideOf(myUid)!==null?lulu('calm','mini'):''}<div><strong>No groups yet</strong>A group keeps a shared tab for your house, a trip, a team or anything that repeats.</div></div>`;
   h += `<div class="card">${act.map(groupRow).join('')||'<div class="row"><span class="mut">All your groups are archived.</span></div>'}</div>`;
   if(arch.length) h += `<div class="sec-h"><h2>Archived</h2></div><div class="card">${arch.map(groupRow).join('')}</div>`;
   return h;
@@ -1865,7 +1925,7 @@ function openCalendar(gid, ym){
 function entryList(list, title, grouped){
   const q = S.q.trim().toLowerCase();
   let items = alive(list).slice().sort(byDate);
-  if(q) items = items.filter(e => [(e.title||''),(e.note||''),nameOf(e.paidBy||e.from),catOf(e.category)[2]].join(' ').toLowerCase().includes(q));
+  if(q) items = items.filter(e => amountHit(e, q) || [(e.title||''),(e.note||''),nameOf(e.paidBy||e.from),catOf(e.category)[2]].join(' ').toLowerCase().includes(q));
   let h = `<div class="sec-h"><h2>${title}</h2></div>`;
   if(alive(list).length > 6) h += `<label for="q" class="sr">Search</label><input class="search" id="q" type="search" placeholder="Search" value="${esc(S.q)}" autocomplete="off">`;
   if(!items.length) return h + `<div class="empty">${q?'No matches.':'Nothing here yet.'}</div>`;
@@ -1881,7 +1941,7 @@ function entryList(list, title, grouped){
 function viewFriends(){
   const ids = friendIds().map(id => ({id, v:friendTotal(id)})).sort((a,b)=> (b.v!==0)-(a.v!==0) || Math.abs(b.v)-Math.abs(a.v) || nameOf(a.id).localeCompare(nameOf(b.id)));
   let h = topBar('Friends', canWrite?`<button class="btn sm primary" id="addFriend">Add friend</button>`:'');
-  if(!ids.length) return h + `<div class="empty"><strong>No friends yet</strong>Add someone to split a dinner, a ride or anything one‑off. They don’t need the app.</div>`;
+  if(!ids.length) return h + `<div class="empty with-lulu">${guideOf(myUid)!==null?lulu('calm','mini'):''}<div><strong>No friends yet</strong>Add someone to split a dinner, a ride or anything one‑off. They don’t need the app.</div></div>`;
   const t = myTotals();
   h += `<div class="statgrid" style="margin-bottom:14px"><div class="stat"><div class="v neg">${money(t.owe)}</div><div class="k">You owe</div></div><div class="stat"><div class="v pos">${money(t.owed)}</div><div class="k">You’re owed</div></div></div>`;
   h += `<div class="card">${ids.map(x=>`<button class="row" data-friend="${esc(x.id)}">${av(x.id)}<div class="body"><div class="t ell">${esc(nameOf(x.id))}</div>
@@ -1917,7 +1977,7 @@ function rowFor(e, showCtx){
   const priv = e._priv ? ' data-priv="1"' : '';
   if(e.kind==='payment'){
     return `<button class="row" data-exp="${esc(e._id)}"${priv}><span class="ic">${icon('coin')}</span>
-      <div class="body"><div class="t">${esc(youOr(e.from))} paid ${esc(youOrLower(e.to))}</div><div class="m">${dayLabel(e.date)}${ctx}${e.confirmed===false?', not confirmed yet':''}</div></div>
+      <div class="body"><div class="t">${esc(youOr(e.from))} paid ${esc(youOrLower(e.to))}</div><div class="m">${dayLabel(e.date)}${ctx}${e.note?', '+esc(e.note):''}${e.confirmed===false?', not confirmed yet':''}</div></div>
       <div class="r"><b>${money(e.amount)}</b>${e.deletedAt?'<small class="mut">deleted</small>':''}</div></button>`;
   }
   if(e.status==='needs_amount') return `<button class="row" data-exp="${esc(e._id)}"${priv}><span class="ic">${catIcon(e.category)}</span>
@@ -1925,20 +1985,28 @@ function rowFor(e, showCtx){
   let yours = '';
   if(e.deletedAt) yours = `<small class="mut">deleted</small>`;
   else { const share = (e.split||{})[myUid]||0, v = (e.paidBy===myUid?e.amount:0) - share;
-    yours = v>0?`<small class="pos">you lent ${money(v)}</small>`:v<0?`<small class="neg">you owe ${money(-v)}</small>`:`<small class="mut">${share?'just you':'not involved'}</small>`; }
+    yours = e.amount<0 ? (v>0?`<small class="pos">you get ${money(v)} back</small>`:v<0?`<small class="neg">you owe ${money(-v)}</small>`:`<small class="mut">${share?'just you':'not involved'}</small>`)
+      : v>0?`<small class="pos">you lent ${money(v)}</small>`:v<0?`<small class="neg">you owe ${money(-v)}</small>`:`<small class="mut">${share?'just you':'not involved'}</small>`; }
   return `<button class="row" data-exp="${esc(e._id)}"${priv}><span class="ic">${catIcon(e.category)}</span>
-    <div class="body"><div class="t">${esc(e.title)}${e.recurringId?` <span class="mut" aria-label="monthly bill">${icon('repeat','tiny')}</span>`:''}${e.comments?` <span class="mut cmt${unreadOn(e)?' new':''}">${icon('bubble','tiny')}${e.comments}</span>`:''}</div><div class="m">${dayLabel(e.date)}${ctx}, ${esc(youOr(e.paidBy))} paid</div></div>
-    <div class="r"><b>${money(e.amount)}</b>${yours}</div></button>`;
+    <div class="body"><div class="t">${esc(e.title)}${e.recurringId?` <span class="mut" aria-label="monthly bill">${icon('repeat','tiny')}</span>`:''}${e.comments?` <span class="mut cmt${unreadOn(e)?' new':''}">${icon('bubble','tiny')}${e.comments}</span>`:''}</div><div class="m">${dayLabel(e.date)}${ctx}, ${esc(youOr(e.paidBy))} ${e.amount<0?'got it':'paid'}</div></div>
+    <div class="r"><b>${e.amount<0?'+'+money(-e.amount)+' in':money(e.amount)}</b>${yours}</div></button>`;
+}
+// "54", "$54" or "54.20" finds the $54.20 thing. Whole dollars match any cents.
+function amountHit(e, q){
+  const m = q.replace(/[$,\s]/g,'').match(/^(\d+)(?:\.(\d{1,2}))?$/); if(!m) return false;
+  const a = Math.abs(e.amount||0), vals = [a, e.orig ? Math.abs(e.orig.amount) : null].filter(v=>v!=null);
+  if(m[2] != null){ const c = +m[1]*100 + +(m[2].padEnd(2,'0')); return vals.includes(c); }
+  return vals.some(v => Math.floor(v/100) === +m[1]);
 }
 function viewActivity(){
   const all = myEntries(), deleted = all.filter(e=>e.deletedAt);
   let h = topBar('Activity');
-  if(!all.length) return h + `<div class="empty"><strong>Nothing yet</strong>Everything you split, in any group or with any friend, shows up here.</div>`;
+  if(!all.length) return h + `<div class="empty with-lulu">${guideOf(myUid)!==null?lulu('calm','mini'):''}<div><strong>Nothing yet</strong>Everything you split, in any group or with any friend, shows up here.</div></div>`;
   const q = S.q.trim().toLowerCase();
   const filters = [['all','All'],['groups','Groups'],['friends','Friends'],['payments','Settle‑ups'],...(deleted.length?[['deleted','Recently deleted']]:[])];
   let list = (S.filter==='deleted' ? deleted.slice().sort((a,b)=>(b.deletedAt||0)-(a.deletedAt||0)) : alive(all).sort(byDate)).filter(e => {
     if(S.filter==='groups') return !!e.groupId; if(S.filter==='friends') return !e.groupId; if(S.filter==='payments') return e.kind==='payment'; return true; });
-  if(q) list = list.filter(e => [(e.title||''),(e.note||''),nameOf(e.paidBy||e.from),ctxLabel(e),catOf(e.category)[2]].join(' ').toLowerCase().includes(q));
+  if(q) list = list.filter(e => amountHit(e, q) || [(e.title||''),(e.note||''),nameOf(e.paidBy||e.from),ctxLabel(e),catOf(e.category)[2]].join(' ').toLowerCase().includes(q));
   const people = [...new Set(all.flatMap(e => e.people||[]))].filter(id => id!==myUid && personRec(id)).sort((a,b)=>nameOf(a).localeCompare(nameOf(b)));
   const usedCats = CATS.filter(c => all.some(e => e.category===c[0]));
   if(S.who) list = list.filter(e => (e.people||[]).includes(S.who));
@@ -2227,7 +2295,7 @@ function openExpense(opts={}){
   const act = isGroup ? activeIn(ctx.id).map(m=>m.id) : mem;
   const st = { paidBy: myUid, cat: opts.asBill?'rent':(isGroup?'groceries':'food'), mode:'equal', ids:new Set(act),
     shares:Object.fromEntries(mem.map(id=>[id,1])), pct:Object.fromEntries(mem.map((id,i)=>[id, i===mem.length-1 ? +(100 - +(100/mem.length).toFixed(2)*(mem.length-1)).toFixed(2) : +(100/mem.length).toFixed(2)])), exact:{},
-    items:[], tax:'', tip:'', cur:'CAD', rate:'', repeat:!!opts.asBill && isGroup, every: bill?.every || 'month', variable:false, amount:'', title:'', date:today(), note:'', dupOk:false, photo: ex?.photo || null };
+    items:[], tax:'', tip:'', cur:'CAD', rate:'', repeat:!!opts.asBill && isGroup, every: bill?.every || 'month', variable:false, amount:'', title:'', date:today(), note:'', dupOk:false, photo: ex?.photo || null, refund: !!opts.refund };
   const g0 = isGroup ? S.groups[ctx.id] : null;
   if(g0?.defaultSplit && !src && !bill && !opts.prefill?.ids && !opts.prefill?.exact) { st.mode = g0.defaultSplit.mode || 'equal'; if(st.mode==='shares') st.shares = Object.fromEntries(mem.map(id=>[id, g0.defaultSplit.input?.shares?.[id]||0])); if(st.mode==='pct') st.pct = Object.fromEntries(mem.map(id=>[id, g0.defaultSplit.input?.pct?.[id]||0])); if(st.mode==='equal' && g0.defaultSplit.input?.ids?.length) st.ids = new Set(g0.defaultSplit.input.ids.filter(id=>mem.includes(id))); }
   const c2s = c => c ? (c/100).toFixed(2) : '';
@@ -2239,7 +2307,7 @@ function openExpense(opts={}){
     if(st.mode==='exact') st.exact = Object.fromEntries(Object.entries(input?.exact||{}).map(([k,v])=>[k,c2s(v)]));
     if(st.mode==='items'){ st.items = (input?.items||[]).map(it=>({n:it.n||'', p:c2s(it.p), ids:new Set((it.ids||[]).filter(id=>mem.includes(id)))})); st.tax = c2s(input?.tax); st.tip = c2s(input?.tip); }
   };
-  if(src){ Object.assign(st,{paidBy:src.paidBy,cat:src.category,amount:c2s(src.orig?src.orig.amount:src.amount),title:src.title,date:copyOf?today():src.date,note:src.note||''});
+  if(src){ Object.assign(st,{paidBy:src.paidBy,cat:src.category,amount:c2s(Math.abs(src.orig?src.orig.amount:src.amount)),refund:src.amount<0,title:src.title,date:copyOf?today():src.date,note:src.note||''});
     if(src.orig){ st.cur = src.orig.cur; st.rate = String(src.orig.rate); }
     loadRule(src.splitMode, src.splitInput); }
   if(bill){ const nd = nextDue(bill);
@@ -2253,7 +2321,7 @@ function openExpense(opts={}){
     else if(pre.exact && Object.keys(pre.exact).every(k=>mem.includes(k))) loadRule('exact',{exact:pre.exact});
     else if(who.length) st.ids = new Set(who); }
   if(st.mode==='items' && !st.items.length) st.items = [{n:'', p:'', ids:new Set(act)}];
-  const title = ex ? 'Edit expense' : bill ? 'Edit bill' : st.repeat ? 'New bill' : copyOf ? 'Copy of expense' : 'New expense';
+  const title = ex ? (st.refund?'Edit money in':'Edit expense') : bill ? 'Edit bill' : st.repeat ? 'New bill' : copyOf ? 'Copy of expense' : opts.refund ? 'Money in' : 'New expense';
   const nameIn = id => id===myUid ? 'Me' : firstName(id);
   openSheet(head(title) + (pre?.ai?`<span class="ai-tag">${icon('sparkle','tiny')} ${pre.receipt?'Read from your receipt':'Filled in for you'}. Check it, then save.</span>`:'') + `
     <div class="ctxbar"><span class="mut">With</span><b class="ell">${esc(ctxTitle(ctx))}</b>${!ex&&!bill?'<button class="link" id="chg">Change</button>':''}</div>
@@ -2265,7 +2333,9 @@ function openExpense(opts={}){
     <label class="f">Category</label><div class="chips" id="catChips">${(() => { const used = {}; alive(ctxEntries(ctx)).forEach(e => { if(e.category) used[e.category] = (used[e.category]||0) + 1; });
       const top = CATS.slice().sort((a,b)=>(used[b[0]]||0)-(used[a[0]]||0)).slice(0,5).map(c=>c[0]); if(!top.includes(st.cat)) top.push(st.cat);
       return CATS.map(c=>`<button class="chip" data-cat="${c[0]}" ${top.includes(c[0])?'':'hidden data-more="1"'}>${icon(c[1])} ${c[2]}</button>`).join('') + (top.length < CATS.length ? `<button class="chip" id="moreCats">More…</button>` : ''); })()}</div>
-    <label class="f">Paid by</label><div class="chips">${mem.map(id=>`<button class="chip" data-pb="${esc(id)}">${av(id,'sm',isGroup?ctx.id:null)}<span class="ell" style="max-width:8em">${esc(nameIn(id))}</span></button>`).join('')}</div>
+    <div id="refWrap" style="margin-top:14px"><button class="chip" id="moneyIn" aria-pressed="${st.refund}">${icon('coin','tiny')} Money coming in</button>
+      <p class="note" id="refNote" style="margin:6px 2px 0">A refund, a deposit back or something sold. It comes off everyone’s share.</p></div>
+    <label class="f" id="pbl">${st.refund?'Who got the money':'Paid by'}</label><div class="chips">${mem.map(id=>`<button class="chip" data-pb="${esc(id)}">${av(id,'sm',isGroup?ctx.id:null)}<span class="ell" style="max-width:8em">${esc(nameIn(id))}</span></button>`).join('')}</div>
     <label class="f" for="dt" id="dtl"></label><input class="in" id="dt" type="date" value="${esc(st.date)}">
     <label class="f">Split</label><p class="note likehint" id="likeHint" hidden style="margin:-4px 2px 10px"></p>
     ${ctx.type==='friend'?`<div class="chips" style="margin-bottom:10px"><button class="chip" data-qs="half">50/50</button><button class="chip" data-qs="theyowe">${esc(firstName(ctx.id))} owes it all</button><button class="chip" data-qs="iowe">I owe it all</button></div>`:''}
@@ -2356,11 +2426,13 @@ function openExpense(opts={}){
       if($('#varWrap')) $('#varWrap').hidden = !st.repeat; if($('#everyWrap')) $('#everyWrap').hidden = !st.repeat; $('#amtBlock').hidden = st.repeat && st.variable;
       if(st.repeat && (st.mode==='items'||st.mode==='exact')) st.mode='equal';
       if(st.repeat){ st.cur='CAD'; $('#cur').value='CAD'; } $('#cur').disabled = st.repeat;
+      if($('#refWrap')){ $('#refWrap').hidden = st.repeat; if(st.repeat) st.refund = false; $('#moneyIn').setAttribute('aria-pressed', st.refund); $('#refNote').hidden = !st.refund; $('#pbl').textContent = st.refund ? 'Who got the money' : 'Paid by'; }
       $('#dtl').textContent = st.repeat ? (bill ? 'Next due date (repeats from this day)' : 'First due date') : 'Date';
       sh.querySelectorAll('[data-every]').forEach(b=>b.setAttribute('aria-pressed', b.dataset.every===st.every));
       drawRows();
     }
     sh.querySelectorAll('[data-every]').forEach(b=>b.onclick=()=>{ st.every=b.dataset.every; syncRepeat(); });
+    $('#moneyIn').onclick = () => { st.refund = !st.refund; syncRepeat(); };
     const press = (attr, val) => sh.querySelectorAll(`[${attr}]`).forEach(b=>b.setAttribute('aria-pressed', b.getAttribute(attr)===val));
     sh.querySelectorAll('[data-cat]').forEach(b=>b.onclick=()=>{st.cat=b.dataset.cat;press('data-cat',st.cat);});
     sh.querySelectorAll('[data-pb]').forEach(b=>b.onclick=()=>{st.paidBy=b.dataset.pb;press('data-pb',st.paidBy);check();});
@@ -2436,6 +2508,12 @@ function openExpense(opts={}){
         const dup = alive(ctxEntries(ctx)).find(e => e.kind!=='payment' && e.amount===cad && near(e.date||'') && ((e.title||'').toLowerCase().split(' ')[0]===title.toLowerCase().split(' ')[0] || e.date===date));
         if(dup){ st.dupOk = true; $('#sn').textContent = `This looks like “${dup.title}” that ${youOrLower(dup.addedBy||dup.paidBy)} added ${dayLabel(dup.date).toLowerCase()}. Tap Save again if it’s a different one.`; $('#sn').className='note bad'; $('#sn').scrollIntoView({block:'center'}); return; }
       }
+      if(ex && !st.clashOk){
+        const nowE = (ex._priv ? S.privEntries : S.expensesRaw).find(x=>x._id===ex._id);
+        if(nowE && (nowE.editedAt||0) !== (ex.editedAt||0) && nowE.editedBy && nowE.editedBy!==myUid){ st.clashOk = true;
+          $('#sn').textContent = `${firstName(nowE.editedBy)} changed this ${whenLabel(nowE.editedAt).toLowerCase()}, while you had it open. Saving replaces their change. Tap Save again to keep yours, or close to see theirs.`;
+          $('#sn').className='note bad'; $('#sn').scrollIntoView({block:'center'}); return; }
+      }
       $('#save').disabled = true;
       if(st.cur!=='CAD') rememberRate(st.cur, rate());
       let done, msg;
@@ -2448,14 +2526,16 @@ function openExpense(opts={}){
       } else {
         const id = ex ? ex._id : newId('e');
         const fsplit = computeSplit(a, st.mode, inp, id);
-        const split = st.cur==='CAD' ? fsplit : splitShares(cad, fsplit, id);
-        const body = { title, amount:cad, paidBy:st.paidBy, split, splitMode:st.mode, splitInput:inp, category:st.cat, date, note,
+        const split0 = st.cur==='CAD' ? fsplit : splitShares(cad, fsplit, id);
+        // money in is stored as a negative expense: the same maths, so it comes off everyone's share
+        const sign = st.refund ? -1 : 1, split = sign > 0 ? split0 : Object.fromEntries(Object.entries(split0).map(([k,v])=>[k,-v]));
+        const body = { title, amount:sign*cad, paidBy:st.paidBy, split, splitMode:st.mode, splitInput:inp, category:st.cat, date, note,
           orig: st.cur==='CAD' ? null : {cur:st.cur, amount:a, rate:rate()}, photo: st.photo || null, people:[...new Set([st.paidBy, ...Object.keys(split)])] };
         const priv = ex ? !!ex._priv : ctxIsPrivate(ctx);
         const ref = priv ? privDoc().collection('entries').doc(id) : db.doc('expenses/'+id);
         if(ex) { const hist = [...(ex.history||[]).slice(-9), {at: ex.editedAt||ex.createdAt||null, by: ex.editedBy||ex.addedBy||null, amount: ex.amount, title: ex.title, paidBy: ex.paidBy, n: Object.keys(ex.split||{}).length}];
           done = await write(() => ref.update({...body, status:null, editedAt:Date.now(), editedBy:myUid, history:hist})); msg='Changes saved'; }
-        else { done = await write(() => ref.set({kind:'expense', ...body, ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now(), addedBy:myUid})); msg='Expense added';
+        else { done = await write(() => ref.set({kind:'expense', ...body, ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now(), addedBy:myUid})); msg=st.refund?'Money in added':'Expense added';
           if(done){ closeSheet(); buzz(10); toast(msg, {label:'Undo', fn:()=>write(()=>ref.update({deletedAt:Date.now(), deletedBy:myUid}))}); postDueBills(); return; } }
         if(done && isGroup) write(()=>db.doc('groups/'+ctx.id).update({lastAt:Date.now()}), true);
       }
@@ -2475,13 +2555,13 @@ function openDetail(id, priv){
   if(e.kind==='payment'){
     const party = e._priv || myUid===e.from || myUid===e.to;
     body = `<div class="pair">${av(e.from,'lg')}<span class="mut">→</span>${av(e.to,'lg')}</div>
-      <p class="detail-amt">${money(e.amount)}</p><p class="note" style="font-size:.95rem;margin:6px 0 0">${esc(youOr(e.from))} paid ${esc(youOrLower(e.to))} on ${dayLabel(e.date)}, ${esc(ctxLabel(e))}. Logged by ${esc(by(e.addedBy))}.${e.confirmed===false?` Waiting for ${esc(youOrLower(e.to))} to confirm.`:''}</p>${delNote}`;
+      <p class="detail-amt">${money(e.amount)}</p><p class="note" style="font-size:.95rem;margin:6px 0 0">${esc(youOr(e.from))} paid ${esc(youOrLower(e.to))} on ${dayLabel(e.date)}, ${esc(ctxLabel(e))}. Logged by ${esc(by(e.addedBy))}.${e.note?' Note: '+esc(e.note)+'.':''}${e.confirmed===false?` Waiting for ${esc(youOrLower(e.to))} to confirm.`:''}</p>${delNote}`;
     if(canWrite && party) actions = del ? '<button class="btn primary" id="res">Restore</button>' : '<button class="btn danger" id="del">Delete payment</button>';
   } else {
     const [,,lab] = catOf(e.category), needs = e.status==='needs_amount';
     const rule = ({shares:'by shares', exact:'by exact amounts', pct:'by percentage', items:'by items'})[e.splitMode] || 'equally';
-    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} CAD`:'', `${lab}, ${dayLabel(e.date)}`, `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
-    body = `<p class="detail-amt">${needs?'Needs amount':money(e.amount)}</p><p class="note" style="margin:6px 0 0">${esc(meta)}.</p>
+    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} CAD`:'', `${lab}, ${dayLabel(e.date)}`, e.amount<0 ? `Money in. ${youOr(e.paidBy)} got it, shared ${rule}` : `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
+    body = `<p class="detail-amt">${needs?'Needs amount':e.amount<0?'+'+money(-e.amount):money(e.amount)}</p><p class="note" style="margin:6px 0 0">${esc(meta)}.</p>
       ${e.note?`<p class="banner" style="margin:12px 0 0">${esc(e.note)}</p>`:''}${delNote}
       ${e.photo&&LAPTOP?`<a class="rphoto" href="/api/photo/${esc(e.photo)}" target="_blank" rel="noopener"><img src="/api/photo/${esc(e.photo)}" alt="Receipt photo" loading="lazy"><span>Receipt photo · tap to open</span></a>`:''}
       ${needs?'':`<div class="split">${Object.entries(e.split||{}).map(([mid,c])=>`<div class="srow">${av(mid,'sm')}<span class="nm">${esc(youOr(mid))}</span><span class="share" style="color:var(--ink)">${money(c)}</span></div>`).join('')}</div>`}
@@ -2507,6 +2587,9 @@ function openDetail(id, priv){
         cl.innerHTML = s.docs.length ? s.docs.map(d => { const c = d.data();
           return `<div class="comment">${av(c.by,'sm')}<div class="body"><div class="who">${esc(youOr(c.by))}, ${esc(whenLabel(c.at))}</div><p>${esc(c.text)}</p></div></div>`; }).join('')
           : `<div class="comment"><span class="mut">No comments yet. Ask about it here instead of the group chat.</span></div>`;
+        // two people commenting at once can each count one; the list itself is the true count
+        const cur = S.expensesRaw.find(x=>x._id===e._id);
+        if(canWrite && cur && s.docs.length > (cur.comments||0) && s.docs.length < 200) write(()=>db.doc('expenses/'+e._id).update({comments:s.docs.length}), true);
       }, () => { const cl = sh.querySelector('#cl'); if(cl) cl.innerHTML = '<div class="comment"><span class="mut">Comments didn’t load.</span></div>'; });
       const cs = sh.querySelector('#cs'), ci = sh.querySelector('#ci');
       if(cs){ const send = async () => { const t = ci.value.trim(); if(!t) return; cs.disabled = true;
@@ -2528,10 +2611,10 @@ function bindDelete(sh, e){
 }
 
 /* ================= PAYMENTS ================= */
-async function recordPayment(ctx, from, to, amount){
+async function recordPayment(ctx, from, to, amount, extra={}){
   const priv = ctxIsPrivate(ctx);
   const recipientConfirms = !priv && to!==myUid && !isGuest(to);
-  const data = {kind:'payment', from, to, amount, date:today(), createdAt:Date.now(), addedBy:myUid, confirmed: !recipientConfirms, people:[from,to]};
+  const data = {kind:'payment', from, to, amount, date:extra.date && extra.date<=today() ? extra.date : today(), note:(extra.note||'').trim().slice(0,80)||null, createdAt:Date.now(), addedBy:myUid, confirmed: !recipientConfirms, people:[from,to]};
   const id = newId('p');
   if(priv) return write(()=>privDoc().collection('entries').doc(id).set({...data, friendId: from===myUid ? to : from}));
   return write(()=>db.doc('expenses/'+id).set({...data, groupId: ctx.type==='group' ? ctx.id : null}));
@@ -2544,6 +2627,8 @@ function confirmPay(p, ctx){
     <label class="f" for="pa">Amount</label><div class="amount-wrap"><span>$</span><input id="pa" inputmode="decimal" value="${(p.amount/100).toFixed(2)}"></div>
     <p class="note" id="pn">${p.to===myUid||isGuest(other)?'Recorded straight away.':`${esc(firstName(p.to))} gets a quick “did you get it?” to confirm.`} Change the amount if only part was paid.</p>
     ${p.from===myUid?etBox(p.to):''}
+    <div class="payrow"><div><label class="f" for="pd">When</label><input class="in" id="pd" type="date" value="${today()}" max="${today()}"></div>
+      <div><label class="f" for="pnote">Note (optional)</label><input class="in" id="pnote" maxlength="80" placeholder="e-Transfer ref, cash…" autocomplete="off"></div></div>
     <div class="foot"><button class="btn" data-close>Not yet</button><button class="btn primary" id="ok">Save</button></div>`, sh => {
     const pa = sh.querySelector('#pa'), ok = sh.querySelector('#ok'), pn = sh.querySelector('#pn'), base = pn.textContent;
     bindCopy(sh, () => toCents(pa.value));
@@ -2551,7 +2636,7 @@ function confirmPay(p, ctx){
       pn.textContent = a > p.amount ? `That’s ${money(a-p.amount)} more than owed, so ${youOrLower(p.to)} would then owe it back.` : base; };
     ok.onclick = async () => { const a = toCents(pa.value); if(!a) return; ok.disabled = true;
       const before = myTotals().net;
-      if(await recordPayment(ctx, p.from, p.to, a)){ closeSheet(); celebrate(a>=p.amount ? 'Paid up! Yatta!' : 'Payment saved!', a>=p.amount && before === (p.from===myUid ? -p.amount : p.amount)); } else ok.disabled = false; };
+      if(await recordPayment(ctx, p.from, p.to, a, {date:sh.querySelector('#pd').value, note:sh.querySelector('#pnote').value})){ closeSheet(); celebrate(a>=p.amount ? 'Paid up! Yatta!' : 'Payment saved!', a>=p.amount && before === (p.from===myUid ? -p.amount : p.amount)); } else ok.disabled = false; };
   });
 }
 function openFriendSettle(fid){
@@ -3324,7 +3409,7 @@ function openAdminPerson(p){
 }
 /* ================= home-screen shortcuts (?do=add, ?do=settle) ================= */
 let pendingDo = new URLSearchParams(location.search).get('do');
-if(pendingDo){ try{ history.replaceState(null, '', location.pathname); }catch(e){} }
+if(pendingDo){ try{ history.replaceState(history.state, '', location.pathname); }catch(e){} }
 function runPendingDo(){
   if(!pendingDo || !ready() || !myUid || !S.people[myUid]) return;
   const d = pendingDo; pendingDo = null;
@@ -3338,6 +3423,7 @@ function runPendingDo(){
 /* ================= monthly bills auto-posting ================= */
 let posting = false;
 async function postDueBills(){
+  if(LAPTOP) return;   // the laptop server posts bills itself, so a phone with an old copy can't overwrite one
   if(posting || !canWrite || !myUid || !S.got.recurring || !S.got.expenses) return;
   posting = true;
   try{
@@ -3485,6 +3571,11 @@ async function boot(timer){
   let knownIds = null;
   watchAll('expenses', docs => { const prev = knownIds; knownIds = new Set(docs.map(d=>d.id));
     S.expensesRaw = docs.map(d => normEntry(d.data(), d.id, false)); S.got.expenses = true; done();
+    // your payment just got confirmed: the guide cheers
+    const pend = new Set(S.expensesRaw.filter(e => e.kind==='payment' && e.from===myUid && e.confirmed===false && !e.deletedAt).map(e=>e._id));
+    if(S.pendMine){ const conf = [...S.pendMine].filter(id=>!pend.has(id)).map(id=>S.expensesRaw.find(e=>e._id===id)).filter(e=>e && e.confirmed===true && !e.deletedAt);
+      if(conf.length) setTimeout(() => guideSay(`${firstName(conf[0].to)} confirmed your ${money(conf[0].amount)}. Paid and done!`, 'react-up'), 500); }
+    S.pendMine = pend;
     if(prev){ const fresh = docs.filter(d => !prev.has(d.id)).map(d => d.data()).filter(e => e && e.addedBy && e.addedBy!==myUid && e.kind==='expense' && !e.deletedAt && !e.recurringId && (e.people||[]).includes(myUid) && Date.now()-(e.createdAt||0) < 120000);
       if(fresh.length){ const e = fresh[0]; setTimeout(() => guideSay(`${firstName(e.addedBy)} just added ${e.title}, ${money(e.amount)}.`, 'glance'), 500); } }
   }, () => { S.got.expenses = true; toast('Some expenses didn’t load. Reload to try again'); done(); });

@@ -112,7 +112,7 @@ Everyone can always sign in with their name (or checked email) and password. Two
 
 Split it stays private either way: nobody can make an account without an invite link from someone already in. Google and email only sign in people who already have an account.
 
-**Your address.** Set `PUBLIC_URL` to the address you open on your phone (your Tailscale Funnel address from step 6, like `https://laptop.tail1234.ts.net`). Email links and Google use it.
+**Your address.** Set `PUBLIC_URL` to the address you open on your phone (your Tailscale Funnel address from step 6, like `https://laptop.tail1234.ts.net`). Email links and Google use it. Emails stay off until it is set.
 
 **Emails (Resend).** This turns on: adding an email to your account, "Forgot password?", and "Email me a sign-in link".
 1. Make a free account at resend.com and create an API key. Put it in `RESEND_API_KEY`.

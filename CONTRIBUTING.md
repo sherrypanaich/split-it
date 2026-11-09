@@ -35,3 +35,11 @@ node --test test/*.test.js
 1. `node --test test/*.test.js` passes.
 2. You opened every screen you touched on a phone-sized window, light and dark.
 3. `CHANGELOG.md` has a line for people, not for developers.
+
+## Releases
+
+Versions follow `vMAJOR.MINOR.PATCH`: a patch for fixes only, a minor for new features, a major for changes that need people to do something when they update.
+
+1. Add a section to the top of `CHANGELOG.md`, headed `## vX.Y.Z · Month D, YYYY`, with a bold one-line headline, then Highlights, New, Improved, Fixed, Security and Known issues (leave out any that are empty).
+2. Set `VERSION` in `server.js` to the same number.
+3. After the pull request is merged, tag main: `git tag vX.Y.Z && git push origin vX.Y.Z`. The Release workflow publishes a GitHub Release from that changelog section.
