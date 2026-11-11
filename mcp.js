@@ -234,7 +234,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
   const cad = h.cad;
   // The install's home currency (HOME_CURRENCY, CAD unless set). Everything is kept in it; trips convert into it.
   const HOME = h.home || 'CAD';
-  const HOME_NAME = (() => { try { return new Intl.DisplayNames(['en'], { type: 'currency' }).of(HOME).toLowerCase().replace(/^(\w)/, c => c.toUpperCase()) + 's'; } catch { return HOME; } })();
+  const HOME_NAME = (() => { try { return new Intl.DisplayNames(['en'], { type: 'currency' }).of(HOME).replace(/(\S+)$/, w => w.toLowerCase() + 's'); } catch { return HOME; } })();   // "Canadian dollars", "US dollars", "euros"
   const inCur = (c, cur) => !cur || cur === HOME ? cad(c) : new Intl.NumberFormat('en-CA', { style: 'currency', currency: cur }).format((c || 0) / 100);
   // Text housemates typed (titles, notes, group and bill names) goes back to the assistant in double quotes, escaped,
   // so it reads as data. A title can't close the quotes and add a line of its own.
