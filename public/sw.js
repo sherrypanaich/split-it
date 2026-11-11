@@ -4,7 +4,12 @@
 // signing in on the same phone (or anyone signing out) clears it, so nobody sees someone else's numbers offline.
 const SHELL = 'split-it-shell-v4', DATA_PREFIX = 'split-it-data-v4-', WHO_KEY = '/__split-it-who';
 const PRECACHE = ['/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/shim.js'];
-self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(PRECACHE).catch(() => {}))); self.skipWaiting(); });
+// The page itself too: a worker that takes over an open page (right after an update) never sees it load,
+// and without it the app wouldn't open away from wifi until the next visit. Signed out, '/' is a redirect and isn't kept.
+self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(async c => {
+  await c.addAll(PRECACHE).catch(() => {});
+  try { const r = await fetch('/', { credentials: 'same-origin' }); if (cacheable(r)) await c.put('/', r); } catch {}
+})); self.skipWaiting(); });
 self.addEventListener('activate', e => e.waitUntil((async () => {
   for (const k of await caches.keys()) if (k !== SHELL && !k.startsWith(DATA_PREFIX)) await caches.delete(k);
   await self.clients.claim();

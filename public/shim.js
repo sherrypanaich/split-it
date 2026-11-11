@@ -291,6 +291,14 @@
     const qq = queue(); if (qq.some(x => x.by && x.by !== who)) setQueue(qq.filter(x => !x.by || x.by === who));
     const a = aside(); if (a.some(x => x.by && x.by !== who)) setAside(a.filter(x => !x.by || x.by === who));
   };
+  // A service worker just took over this open page (the first visit, or right after an update): it hasn't seen
+  // who is signed in or any of the data yet, so ask again through it, and the copy for offline starts now, not next time.
+  try {
+    if (navigator.serviceWorker) navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!me) return;
+      me = null; getMe().then(() => subs.forEach(s => s.refresh()), () => {});
+    });
+  } catch {}
   const user = {
     id: async () => (await getMe()).uid,
     isOwner: async () => (await getMe()).isOwner,
