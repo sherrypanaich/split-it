@@ -492,7 +492,7 @@ test('an assistant sees private one-on-ones with friends who are not on the app,
   assert.match(bal, /You owe Moe \$45\.00/, bal);
   assert.ok(!/\$5\.00/.test(bal), 'deleted ones do not count');
   const recent = (await tool(key, 'recent_expenses')).text;
-  assert.match(recent, /Carried over \$407\.08.*one-on-one with Raja/, recent);
+  assert.match(recent, /"Carried over" \$407\.08.*one-on-one with Raja/, recent);
 
   const add = await tool(key, 'add_expense', { title: 'Lunch', amount: 20, with_person: 'Raja' });
   assert.ok(!add.isError, add.text);
