@@ -5,7 +5,7 @@
 Split it tracks who paid for what in a shared home: rent, hydro, groceries, the Netflix nobody admits to using. Housemates sign in from their phones, anywhere. Everything is stored on your own machine, with no ads and no tracking.
 
 - Website: https://sherrypanaich.github.io/split-it/
-- Support it: https://github.com/sponsors/sherrypanaich
+- Support it: https://github.com/sponsors/sherrypanaich (running Split it and Budget it together costs $70 a month; Budget it's bank linking costs extra on top of that)
 - Licence: MIT (see `LICENSE`). Character art is not covered by the licence, see "Character art" below.
 
 What's in this repo:

@@ -453,29 +453,29 @@ footer a{font-weight:600}
       <h3>Chip in for the house</h3>
       <p>Split It is free and has no ads. If it saved you an awkward conversation, a small donation to Budget It keeps it and the next projects going.</p>
       <!-- Running fund: the total comes from funding.json, which a GitHub Action refreshes every hour from GitHub Sponsors. data-raised is only the fallback/example. -->
-      <div class="fund" id="fund" data-raised="75" data-month-cost="30" data-goal-months="12">
+      <div class="fund" id="fund" data-raised="105" data-month-cost="70" data-goal-months="12">
         <div class="top"><span class="raised"><span id="fRaised">$75</span><small>raised</small></span><span class="count" id="fCount">2 of 12 months funded</span></div>
         <div class="next">
-          <div class="lbl"><span id="fNextLbl">Month 3</span><span id="fNextAmt">$15 of $30</span></div>
-          <div class="bar" role="progressbar" aria-label="Progress toward the next funded month" aria-valuemin="0" aria-valuemax="30" aria-valuenow="15" id="fBar"><i style="width:50%"></i></div>
+          <div class="lbl"><span id="fNextLbl">Month 3</span><span id="fNextAmt">$35 of $70</span></div>
+          <div class="bar" role="progressbar" aria-label="Progress toward the next funded month" aria-valuemin="0" aria-valuemax="70" aria-valuenow="35" id="fBar"><i style="width:50%"></i></div>
         </div>
         <ol class="months" id="fMonths" aria-label="Months of running costs covered"></ol>
-        <details class="costs"><summary>Where $30 a month goes</summary>
-          <div><span>Server</span><span>$7</span></div>
-          <div><span>Domain name</span><span>$2</span></div>
-          <div><span>Backups</span><span>$1</span></div>
-          <div><span>AI quick add</span><span>$10</span></div>
-          <div><span>Payment fees and room to grow</span><span>$10</span></div>
-          <div><span>Each month</span><span>$30</span></div>
+        <details class="costs"><summary>Where $70 a month goes</summary>
+          <div><span>Servers for Split It and Budget It</span><span>✓</span></div>
+          <div><span>Domain name (budgetit.ca)</span><span>✓</span></div>
+          <div><span>Backups kept off the server</span><span>✓</span></div>
+          <div><span>Payment fees and room to grow</span><span>✓</span></div>
+          <div><span>Each month, both apps together</span><span>$70</span></div>
         </details>
-        <p class="note">The server starts once the first $30 is in. Anything raised beyond a full year goes to a charity we'll name here once we're bigger. Donations aren't tax-deductible and don't come with a receipt. <span id="fExample">Example numbers for now.</span></p>
+        <p class="note">Budget It's bank linking (through Plaid) costs extra on top of this, for each linked bank account.</p>
+        <p class="note">It takes $70 a month to run Split It and Budget It together. The servers start once the first $70 is in. Anything raised beyond a full year goes to a charity we'll name here once we're bigger. Donations aren't tax-deductible and don't come with a receipt. <span id="fExample">Example numbers for now.</span></p>
       </div>
       <div class="tiers" role="group" aria-label="Pick an amount">
-        <button class="tier" type="button" aria-pressed="false" data-amt="5"><b>$5</b><small>About a week of running</small></button>
-        <button class="tier" type="button" aria-pressed="false" data-amt="15"><b>$15</b><small>Half a month</small></button>
-        <button class="tier" type="button" aria-pressed="true" data-amt="30"><b>$30</b><small>One full month</small></button>
+        <button class="tier" type="button" aria-pressed="false" data-amt="10"><b>$10</b><small>About four days of running</small></button>
+        <button class="tier" type="button" aria-pressed="false" data-amt="35"><b>$35</b><small>Half a month</small></button>
+        <button class="tier" type="button" aria-pressed="true" data-amt="70"><b>$70</b><small>One full month</small></button>
       </div>
-      <a class="btn" id="donateBtn" href="https://github.com/sponsors/sherrypanaich">Donate $30</a>
+      <a class="btn" id="donateBtn" href="https://github.com/sponsors/sherrypanaich">Donate $70</a>
       <p class="where">Donations go through <b>GitHub Sponsors</b>. Monthly or one-time.</p>
     </div>
   </div>
@@ -484,7 +484,7 @@ footer a{font-weight:600}
 <section class="sec" id="faq" aria-labelledby="faq-h">
   <div class="sec-head"><span class="tag"><span>FAQ</span></span><h2 id="faq-h">Questions housemates ask.</h2></div>
   <div class="faq">
-    <details open><summary>Is it really free?</summary><p>Yes. The app is free and open source, Tailscale's free plan covers the web address, and quick add runs on the phone with no AI costs. The only running cost is the electricity for a laptop that's on all the time.</p></details>
+    <details open><summary>Is it really free?</summary><p>Yes. The app is free and open source, and quick add runs on the phone with no AI costs. If you host it yourself, the only running cost is the electricity for a laptop that's on all the time. Running our own copies of Split It and Budget It costs $70 a month in total, which is what donations cover. Budget It's bank linking costs extra on top of that.</p></details>
     <details><summary>Where does my data live?</summary><p>On your laptop, in a folder called <span class="mono">data/</span>. Nothing is sent to us or anyone else. Copy that folder somewhere safe every so often and you have a full backup, receipt photos included.</p></details>
     <details><summary>Do my housemates need to install anything?</summary><p>No. They open the address in their phone browser and sign in. Adding it to the home screen makes it feel like a normal app and turns on notifications.</p></details>
     <details><summary>What if the laptop is off?</summary><p>The app is down until it's back on. Nothing is lost, because everything is saved on the laptop. Set it to never sleep when plugged in and it'll just keep running.</p></details>
@@ -535,7 +535,7 @@ footer a{font-weight:600}
   // running fund meter
   (function(){
     const f = document.getElementById('fund'); if(!f) return;
-    const cost = Number(f.dataset.monthCost)||30, goal = Number(f.dataset.goalMonths)||12;
+    const cost = Number(f.dataset.monthCost)||70, goal = Number(f.dataset.goalMonths)||12;
     function render(raisedIn, startMonth){
     const raised = Math.max(0, Number(raisedIn)||0);
     const full = Math.floor(raised / cost), part = raised - full*cost;
