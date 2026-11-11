@@ -7,7 +7,8 @@
 //   node server.js list-users
 //   node server.js remove-user NAME   (signs them out everywhere; their past expenses stay)
 //   node server.js code-off NAME      turn off someone's sign-in code (they lost their phone)
-//   node server.js backup FILE.zip    write a full backup (data, sign-ins, photos) to a zip file
+//   node server.js backup FILE.zip    write a full backup (data, sign-ins, photos) to a zip file (locked when BACKUP_PASSPHRASE is set)
+//   node server.js restore FILE       put a backup back (.zip, .locked or a daily db .json), from a file on this computer
 // These work while the app is running: the command hands the job to the running app.
 //
 // The owner can do all of the people and backup things from the app too: tap your picture, then "Run Split it".
@@ -43,63 +44,142 @@ const PHOTO_DIR = path.join(DATA_DIR, 'photos');
 const PUSH_FILE = path.join(DATA_DIR, 'push.json');
 const PUSH_KEYS_FILE = path.join(DATA_DIR, 'push-keys.json');
 const PUSH_CONTACT = process.env.PUSH_CONTACT || 'mailto:split-it@example.com';
-const REMIND_HOUR = +process.env.REMIND_HOUR || 9;   // bill reminders go out after this hour, laptop time
+const REMIND_HOUR = +process.env.REMIND_HOUR || 9;   // bill reminders go out after this hour, in the TZ time zone
 // A second place for backups that isn't this laptop's data folder: a USB drive, or a folder a sync app
-// (Dropbox, Syncthing, Nextcloud...) sends elsewhere. One full zip a day goes there, 14 kept.
+// (Dropbox, Syncthing, Nextcloud...) sends elsewhere. The records go there every 6 hours (one file a day, 14 days kept),
+// and each receipt photo is copied into its photos/ folder once.
 const BACKUP_COPY_DIR = (process.env.BACKUP_COPY_DIR || '').trim() ? path.resolve(process.env.BACKUP_COPY_DIR.trim()) : null;
+// With BACKUP_PASSPHRASE set, those copies (and downloads, if asked) are locked with it, the same way Budget it does.
+const BACKUP_PASSPHRASE = process.env.BACKUP_PASSPHRASE || '';
 const KEEP_COPIES = 14;
 const KEEP_BACKUPS = 30;          // daily copies
 const KEEP_WEEKLY = 52;           // Sunday copies, kept a year
+const KEEP_RECENT = 12;           // the 6-hourly and at-start copies (about 3 days)
+const SNAPSHOT_HOURS = 6;
+// "Today" on the server. Every date the server works out (bills due, reminders, backup names) uses local time,
+// which is the TZ setting (TZ=America/Toronto). Never new Date().toISOString().slice(0, 10): that is UTC.
+const pad2 = n => String(n).padStart(2, '0');
+const localDay = (d = new Date()) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const localStamp = (d = new Date()) => `${localDay(d)}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+const serverZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
 const SESSION_DAYS = 90;
 const PHOTOS_PER_DAY = 40;        // per person
 const PHOTO_KEEP_DELETED_DAYS = 730;
 
 fs.mkdirSync(BACKUP_DIR, { recursive: true });
 fs.mkdirSync(PHOTO_DIR, { recursive: true });
+// Uploads being restored and downloads being made sit here for a moment; anything left from a crash goes when the app starts.
+const WORK_DIR = path.join(BACKUP_DIR, 'work');
+fs.mkdirSync(WORK_DIR, { recursive: true, mode: 0o700 });
+const workFile = kind => path.join(WORK_DIR, `${kind}-${process.pid}-${crypto.randomBytes(6).toString('hex')}.part`);
 
 // ---------- storage: plain JSON files, written atomically ----------
 // A missing file means a fresh start. A damaged one never does: we fall back to the newest good
-// copy (users.json.bak, or the latest daily backup of db.json), and refuse to start if there is none,
-// so a bad file can't quietly be replaced by an empty house.
-function load(file, empty, fallbacks = []) {
+// copy (users.json.bak, or the latest backup of db.json), and refuse to start if there is none,
+// so a bad file can't quietly be replaced by an empty house. When that happens the owner is told
+// (which copy, and when it was taken) until they dismiss it: see ownerAlerts().
+const RECOVERED_FILE = path.join(DATA_DIR, 'recovered.json');
+let recovered = []; try { recovered = JSON.parse(fs.readFileSync(RECOVERED_FILE, 'utf8')); if (!Array.isArray(recovered)) recovered = []; } catch {}
+function load(file, empty, fallbacks = [], looksRight = () => true) {
   let text;
   try { text = fs.readFileSync(file, 'utf8'); } catch (e) { if (e.code === 'ENOENT') return empty; throw e; }
-  try { return JSON.parse(text); } catch (e) {
-    console.error(`${path.basename(file)} is damaged (${e.message}).`);
-    for (const fb of fallbacks) {
-      try {
-        const data = JSON.parse(fs.readFileSync(fb, 'utf8'));
-        const keep = file + '.damaged-' + Date.now();
-        fs.renameSync(file, keep);
-        fs.copyFileSync(fb, file);
-        console.error(`Restored it from ${path.basename(fb)}. The damaged file was kept as ${path.basename(keep)}.`);
-        return data;
-      } catch {}
-    }
-    console.error(`No good copy found. Split it won't start, so nothing gets overwritten. Fix or replace ${file}, then start it again.`);
-    process.exit(1);
+  let why;
+  try { const data = JSON.parse(text); if (looksRight(data)) return data; why = 'it parses, but isn’t shaped like Split it data'; } catch (e) { why = e.message; }
+  console.error(`${path.basename(file)} is damaged (${why}).`);
+  for (const fb of fallbacks) {
+    try {
+      const data = JSON.parse(fs.readFileSync(fb, 'utf8'));
+      if (!looksRight(data)) continue;
+      const copyAt = fs.statSync(fb).mtimeMs;
+      const keep = file + '.damaged-' + Date.now();
+      fs.renameSync(file, keep);
+      fs.copyFileSync(fb, file);
+      console.error(`Restored it from ${path.basename(fb)}. The damaged file was kept as ${path.basename(keep)}.`);
+      recovered.push({ file: path.basename(file), from: path.basename(fb), copyAt, at: Date.now(), kept: path.basename(keep) });
+      try { fs.writeFileSync(RECOVERED_FILE, JSON.stringify(recovered)); } catch {}
+      return data;
+    } catch {}
   }
+  console.error(`No good copy found. Split it won't start, so nothing gets overwritten. Fix or replace ${file}, then start it again.`);
+  process.exit(1);
 }
-const newestBackups = () => { try { return fs.readdirSync(BACKUP_DIR).filter(f => /^db-(weekly-)?\d{4}-\d\d-\d\d\.json$/.test(f))
-  .sort((a, b) => b.replace('weekly-', '').localeCompare(a.replace('weekly-', ''))).map(f => path.join(BACKUP_DIR, f)); } catch { return []; } };
+const isPlainObject = o => !!o && typeof o === 'object' && !Array.isArray(o);
+// What a db.json has to look like before it may replace what's here. Strict for a restore, loose at start.
+function dataProblem(d, strict = true) {
+  if (!isPlainObject(d)) return 'it isn’t Split it data';
+  if (!isPlainObject(d.docs)) return 'it has no list of records (“docs”)';
+  if (strict) for (const [k, v] of Object.entries(d.docs)) {
+    if (!/^[A-Za-z0-9_\-.~:@+]+(\/[A-Za-z0-9_\-.~:@+]+)*$/.test(k) || k.split('/').length % 2) return `it has a record with an odd name (${k.slice(0, 60)})`;
+    if (!isPlainObject(v)) return `the record ${k.slice(0, 60)} is empty or broken`;
+  }
+  return null;
+}
+function usersProblem(u) {
+  if (!isPlainObject(u) || !isPlainObject(u.users)) return 'it has no list of people';
+  for (const [id, x] of Object.entries(u.users)) if (!isPlainObject(x) || typeof x.name !== 'string') return `the person ${String(id).slice(0, 40)} is broken`;
+  return null;
+}
+const newestBackups = () => { try { return fs.readdirSync(BACKUP_DIR).filter(f => /^db-(weekly-)?\d{4}-\d\d-\d\d(-\d{4})?\.json$/.test(f))
+  .sort((a, b) => { const k = f => f.replace('weekly-', '').replace(/\.json$/, '').padEnd(18, '0'); return k(b).localeCompare(k(a)); })
+  .map(f => path.join(BACKUP_DIR, f)); } catch { return []; } };
+// A write that fails (the disk is full, the drive went read-only) never stops the app. It keeps serving what it has
+// in memory, refuses new changes with a clear message (status 507), tries again, and the owner sees a warning.
+const storage = { failing: {}, retryAt: 0 };   // file name -> { code, message, at, obj }
+const diskMessage = e => e && (e.code === 'ENOSPC' || e.code === 'EDQUOT')
+  ? 'The laptop’s disk is full, so this wasn’t saved. Nothing already saved is lost. Free some space on the laptop, then try again.'
+  : `Split it couldn’t write to its data folder${e && e.code ? ` (${e.code})` : ''}, so this wasn’t saved. Try again in a moment.`;
+const diskError = e => { if (e && typeof e === 'object' && !e.storage) { e.storage = true; e.storageMessage = diskMessage(e); } return e; };
 const save = (file, obj) => {
-  const tmp = file + '.tmp';
-  const fd = fs.openSync(tmp, 'w');
-  try { fs.writeSync(fd, JSON.stringify(obj)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
-  fs.renameSync(tmp, file);   // on disk before it replaces the old file, so a power cut leaves one good copy
+  const tmp = file + '.tmp', name = path.basename(file);
+  try {
+    const fd = fs.openSync(tmp, 'w');
+    try { fs.writeSync(fd, JSON.stringify(obj)); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    fs.renameSync(tmp, file);   // on disk before it replaces the old file, so a power cut leaves one good copy
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    diskError(e);
+    if (!storage.failing[name]) console.error(`Couldn’t save ${name}:`, e.message);
+    storage.failing[name] = { code: e.code || null, message: e.storageMessage, at: storage.failing[name]?.at || Date.now(), file, obj };
+    throw e;
+  }
+  delete storage.failing[name];
 };
-let db = load(DB_FILE, { docs: {} }, newestBackups());          // { docs: { "groups/g1/members/u1": {...} } }
-let users = load(USERS_FILE, { users: {}, sessions: {} }, [USERS_FILE + '.bak']);
+// The reason writes are refused right now, or null. Tries the failed saves again (at most every 3 seconds) first.
+function storageProblem() {
+  if (!Object.keys(storage.failing).length) return null;
+  if (Date.now() >= storage.retryAt) {
+    storage.retryAt = Date.now() + 3e3;
+    for (const [name, f] of Object.entries(storage.failing)) {
+      if (name === 'db.json') { if (dbDirty) flushDb(); else delete storage.failing[name]; }
+      else try { save(f.file, f.obj); } catch {}
+    }
+  }
+  const f = Object.values(storage.failing)[0]; return f ? f.message : null;
+}
+let db = load(DB_FILE, { docs: {} }, newestBackups(), d => !dataProblem(d, false));          // { docs: { "groups/g1/members/u1": {...} } }
+let users = load(USERS_FILE, { users: {}, sessions: {} }, [USERS_FILE + '.bak'], u => isPlainObject(u) && isPlainObject(u.users));
 let pushes = load(PUSH_FILE, { subs: {}, remindedOn: null }, [PUSH_FILE + '.bak']);   // subs: { uid: [subscription, ...] }
 // db.json is the big one, so quick bursts of writes are batched into one save a moment later.
-let dbTimer = null, dbDirty = false;
-const flushDb = () => { if (dbTimer) { clearTimeout(dbTimer); dbTimer = null; } if (!dbDirty) return; dbDirty = false; save(DB_FILE, db); };
+// Money entries (expenses and payments) are the exception: they're on disk before the phone hears "saved" (commitDb).
+let dbTimer = null, dbDirty = false, dbRetry = null;
+const flushDb = () => {   // -> true when what's in memory is on disk
+  if (dbTimer) { clearTimeout(dbTimer); dbTimer = null; }
+  if (!dbDirty) return true;
+  try { save(DB_FILE, db); dbDirty = false; return true; }
+  catch { if (!dbRetry) { dbRetry = setTimeout(() => { dbRetry = null; flushDb(); }, 30e3); dbRetry.unref?.(); } return false; }
+};
 const saveDb = () => { dbDirty = true; if (!dbTimer) dbTimer = setTimeout(flushDb, 600); };
+const isMoneyPath = p => /^expenses\/[^/]+$/.test(String(p || ''));
+// After a change to db: written now when it touches an expense or payment, a moment later otherwise. -> false when the disk refused it.
+function commitDb(paths = []) {
+  if (paths.some(isMoneyPath)) { dbDirty = true; return flushDb(); }
+  saveDb(); return !storage.failing['db.json'];
+}
 const saveUsers = () => save(USERS_FILE, users);
 const savePushes = () => save(PUSH_FILE, pushes);
 if (migrateSessions(users)) saveUsers();   // sign-in tokens are kept hashed now; older files are converted once, nobody is signed out
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { flushDb(); dropLock(); process.exit(0); });
-process.on('beforeExit', flushDb);
+process.on('beforeExit', () => { flushDb(); });
 
 // Look people up by id without ever landing on a built-in like "constructor" or "__proto__".
 const userOf = id => typeof id === 'string' && Object.hasOwn(users.users, id) ? users.users[id] : undefined;
@@ -148,11 +228,22 @@ async function cli([cmd, ...rest]) {
     return;
   }
   if (cmd === 'backup') {
-    const file = name || `split-it-backup-${new Date().toISOString().slice(0, 10)}.zip`;
-    fs.writeFileSync(file, backupZip());
-    return console.log(`Wrote ${file} (${(fs.statSync(file).size / 1e6).toFixed(1)} MB).`);
+    const pass = BACKUP_PASSPHRASE, file = name || `split-it-backup-${localDay()}.${pass ? 'locked' : 'zip'}`;
+    try { writeBackup(file, { pass }); } catch (e) { return console.log(`Couldn’t write ${file}: ${e.storage ? e.storageMessage : e.message}`); }
+    return console.log(`Wrote ${file} (${(fs.statSync(file).size / 1e6).toFixed(1)} MB)${pass ? ', locked with BACKUP_PASSPHRASE. Without it nobody can open it, you included' : ''}.`);
   }
-  if (!['add-user', 'set-password', 'remove-user', 'code-off'].includes(cmd)) return console.log('Commands: add-user NAME, set-password NAME, remove-user NAME, code-off NAME, list-users, backup FILE.zip, mcp-key NAME, mcp-revoke NAME');
+  if (cmd === 'restore') {   // reads a file on this computer, so a big backup never has to go through the website
+    if (!name || !fs.existsSync(name)) return console.log('Usage: node server.js restore FILE  (a .zip or .locked backup, or a daily db-....json)');
+    const file = path.resolve(name), job = { cmd: 'restore', file, pass: '' };
+    if (isLockedFile(file)) job.pass = BACKUP_PASSPHRASE || await ask('Passphrase for this backup: ');
+    console.log(`Restoring ${path.basename(file)}…`);
+    // A running app does it itself, so what it holds in memory can't be written back over the restore.
+    const answer = await askServer(job, 30 * 60e3);
+    if (answer && answer.text) return console.log(answer.text);
+    if (answer) return console.log('The app is running but didn’t answer in time. It may still be restoring: look at the owner’s page in a minute.');
+    return console.log(localCommand(job).text);
+  }
+  if (!['add-user', 'set-password', 'remove-user', 'code-off'].includes(cmd)) return console.log('Commands: add-user NAME, set-password NAME, remove-user NAME, code-off NAME, list-users, backup FILE.zip, restore FILE, mcp-key NAME, mcp-revoke NAME');
   if (!name) return console.log(`Usage: node server.js ${cmd} NAME`);
   const found = findUser(name), job = { cmd, name };
   if (cmd === 'add-user' && found) return console.log(`${name} already exists. Use set-password to change it.`);
@@ -172,7 +263,13 @@ async function cli([cmd, ...rest]) {
   console.log(localCommand(job).text + (answer ? ' The app is running but didn’t answer, so restart it to pick this up.' : ''));
 }
 // What those commands do. Used here when the app is stopped, and by the running app when it is asked (see /api/local/cli).
-function localCommand({ cmd, name, password }) {
+function localCommand({ cmd, name, password, file, pass }) {
+  if (cmd === 'restore') {
+    try {
+      const r = restoreFile(String(file || ''), String(pass || ''), { photosDir: path.join(path.dirname(String(file || '')), 'photos') });
+      return { text: `Restored ${r.docs} records${r.users != null ? `, ${r.users} people` : ''} and ${r.photos} receipt photo${r.photos === 1 ? '' : 's'}. What was there before is kept in ${BACKUP_DIR} (before-restore-...).` };
+    } catch (e) { return { text: `Nothing was restored. ${e.storage ? e.storageMessage : e.message}${e.locked && BACKUP_PASSPHRASE ? ' (BACKUP_PASSPHRASE was tried. To type another one: BACKUP_PASSPHRASE= node server.js restore FILE)' : ''}` }; }
+  }
   const found = findUser(name || '');
   if (cmd === 'add-user') {
     if (found) return { text: `${name} already exists. Use set-password to change it.` };
@@ -206,11 +303,11 @@ function claimLock() {
   fs.writeFileSync(LOCK_FILE, JSON.stringify({ pid: process.pid, port: PORT, token: localToken }), { mode: 0o600 });
 }
 const dropLock = () => { try { if (JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')).pid === process.pid) fs.unlinkSync(LOCK_FILE); } catch {} };
-async function askServer(job) {   // -> the running app's answer, null when none is running, {} when it didn't answer
+async function askServer(job, wait = 8000) {   // -> the running app's answer, null when none is running, {} when it didn't answer
   let lock; try { lock = JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')); process.kill(lock.pid, 0); } catch { return null; }
   try {
     const r = await fetch(`http://127.0.0.1:${lock.port}/api/local/cli`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Local-Token': lock.token },
-      body: JSON.stringify(job), signal: AbortSignal.timeout(8000) });
+      body: JSON.stringify(job), signal: AbortSignal.timeout(wait) });
     return r.ok ? await r.json() : {};
   } catch { return {}; }
 }
@@ -591,40 +688,103 @@ function broadcast(paths, extra, before = {}) {
 }
 const tellEveryone = (event, data) => { for (const res of listeners.keys()) res.write(`event: ${event}\ndata: ${JSON.stringify(data || {})}\n\n`); };
 
-// ---------- backups: one a day (30 kept) and one a week (a year kept) ----------
-let lastBackupAt = null;
-function backup() {
-  flushDb();
-  const now = new Date(), day = now.toISOString().slice(0, 10);
-  const file = path.join(BACKUP_DIR, `db-${day}.json`);
-  if (!fs.existsSync(file) && fs.existsSync(DB_FILE)) { fs.copyFileSync(DB_FILE, file); lastBackupAt = Date.now(); }
-  const weekly = path.join(BACKUP_DIR, `db-weekly-${day}.json`);
-  if (now.getDay() === 0 && !fs.existsSync(weekly) && fs.existsSync(DB_FILE)) fs.copyFileSync(DB_FILE, weekly);
-  const trim = (re, keep) => { const old = fs.readdirSync(BACKUP_DIR).filter(f => re.test(f)).sort();
-    for (const f of old.slice(0, Math.max(0, old.length - keep))) fs.unlinkSync(path.join(BACKUP_DIR, f)); };
-  trim(/^db-\d{4}-\d\d-\d\d\.json$/, KEEP_BACKUPS);
-  trim(/^db-weekly-\d{4}-\d\d-\d\d\.json$/, KEEP_WEEKLY);
-  for (const f of [USERS_FILE, PUSH_FILE]) try { JSON.parse(fs.readFileSync(f, 'utf8')); fs.copyFileSync(f, f + '.bak'); } catch {}
-  pruneSessions();
-  prunePhotos();
-  copyOut();
+// ---------- backups ----------
+// In data/backups: a copy of db.json every 6 hours and at every start (so each update starts with one), 12 kept;
+// the first one of each day (30 kept); and one each Sunday (a year kept). Runs hourly. A failure (full disk) is
+// caught, logged and shown to the owner; the app carries on.
+let lastBackupAt = null, lastSnapshotAt = 0;
+const backupState = { error: null, at: null };
+try { const n = newestBackups()[0]; if (n) lastBackupAt = fs.statSync(n).mtimeMs; } catch {}
+function backup(atStart) {
+  try {
+    if (!flushDb()) throw diskError(Object.assign(new Error('db.json couldn’t be saved'), { code: storage.failing['db.json']?.code }));
+    if (!fs.existsSync(DB_FILE)) save(DB_FILE, db);   // a brand-new install: the first copy still has something to copy
+    const now = new Date(), day = localDay(now);
+    {
+      const daily = path.join(BACKUP_DIR, `db-${day}.json`);
+      if (!fs.existsSync(daily)) { fs.copyFileSync(DB_FILE, daily); lastBackupAt = Date.now(); }
+      const weekly = path.join(BACKUP_DIR, `db-weekly-${day}.json`);
+      if (now.getDay() === 0 && !fs.existsSync(weekly)) fs.copyFileSync(DB_FILE, weekly);
+      if (atStart || Date.now() - lastSnapshotAt >= SNAPSHOT_HOURS * 3600e3) {
+        lastSnapshotAt = Date.now();
+        const recent = fs.readdirSync(BACKUP_DIR).filter(f => /^db-\d{4}-\d\d-\d\d-\d{4}\.json$/.test(f)).sort().pop();
+        const same = recent && fs.readFileSync(path.join(BACKUP_DIR, recent)).equals(fs.readFileSync(DB_FILE));   // nothing changed since: no new copy
+        if (!same) fs.copyFileSync(DB_FILE, path.join(BACKUP_DIR, `db-${localStamp(now)}.json`));
+        lastBackupAt = Date.now();
+      }
+    }
+    const trim = (re, keep) => { const old = fs.readdirSync(BACKUP_DIR).filter(f => re.test(f)).sort();
+      for (const f of old.slice(0, Math.max(0, old.length - keep))) fs.unlinkSync(path.join(BACKUP_DIR, f)); };
+    trim(/^db-\d{4}-\d\d-\d\d\.json$/, KEEP_BACKUPS);
+    trim(/^db-weekly-\d{4}-\d\d-\d\d\.json$/, KEEP_WEEKLY);
+    trim(/^db-\d{4}-\d\d-\d\d-\d{4}\.json$/, KEEP_RECENT);
+    for (const f of [USERS_FILE, PUSH_FILE]) try { JSON.parse(fs.readFileSync(f, 'utf8')); fs.copyFileSync(f, f + '.bak'); } catch {}
+    pruneSessions();
+    prunePhotos();
+    backupState.error = null; backupState.at = Date.now();
+  } catch (e) {
+    diskError(e);
+    backupState.error = e.code === 'ENOSPC' || e.code === 'EDQUOT' ? 'The laptop’s disk is full, so no backup could be made.' : `The backup didn’t work: ${e.message}`;
+    console.error('Backup:', e.message);
+  }
+  copyOut(false, atStart);
 }
-// The copy that survives this laptop's disk: today's full zip in BACKUP_COPY_DIR, if it isn't there yet.
+// The copy that survives this laptop's disk, in BACKUP_COPY_DIR: today's records (db.json, users.json, oauth.json) in one
+// file, refreshed every 6 hours, 14 days kept; and photos/, where each receipt photo is copied once, the first time it's seen.
+// With BACKUP_PASSPHRASE the day's file is a .locked one, and so is each photo.
 const copyState = { at: null, error: null };
-function copyOut(force) {
+const copyRe = /^split-it-backup-\d{4}-\d\d-\d\d\.(zip|locked)$/;
+const copyName = day => `split-it-backup-${day}.${BACKUP_PASSPHRASE ? 'locked' : 'zip'}`;
+function copyOut(force, atStart) {
   if (!BACKUP_COPY_DIR) return null;
   try {
+    const mine = () => fs.readdirSync(BACKUP_COPY_DIR).filter(f => copyRe.test(f)).sort();
+    const file = path.join(BACKUP_COPY_DIR, copyName(localDay()));
+    const age = fs.existsSync(file) ? Date.now() - fs.statSync(file).mtimeMs : Infinity;
+    // hourly, the copy is only made when today's is missing or 6 hours old, or the last try failed (a drive unplugged)
+    if (!force && !atStart && age < SNAPSHOT_HOURS * 3600e3 && !copyState.error) return copyState;
     fs.mkdirSync(BACKUP_COPY_DIR, { recursive: true });
-    const mine = () => fs.readdirSync(BACKUP_COPY_DIR).filter(f => /^split-it-backup-\d{4}-\d\d-\d\d\.zip$/.test(f)).sort();
-    const file = path.join(BACKUP_COPY_DIR, `split-it-backup-${new Date().toISOString().slice(0, 10)}.zip`);
-    if (force || !fs.existsSync(file)) { const tmp = file + '.part'; fs.writeFileSync(tmp, backupZip(), { mode: 0o600 }); fs.renameSync(tmp, file); }
+    const key = BACKUP_PASSPHRASE ? lockSession(BACKUP_PASSPHRASE) : null;   // one slow key per run, for the file and every photo
+    writeBackup(file, { photos: false, pass: BACKUP_PASSPHRASE, key });
+    copyPhotosOut(key);
     const all = mine(); for (const f of all.slice(0, Math.max(0, all.length - KEEP_COPIES))) fs.unlinkSync(path.join(BACKUP_COPY_DIR, f));
     copyState.at = fs.statSync(path.join(BACKUP_COPY_DIR, mine().pop())).mtimeMs; copyState.error = null;
-  } catch (e) { copyState.error = e.code === 'ENOENT' || e.code === 'EACCES' || e.code === 'EROFS' ? `Can’t write to ${BACKUP_COPY_DIR}. Is the drive plugged in?` : e.message; console.error('Backup copy:', e.message); }
+  } catch (e) {
+    copyState.error = e.code === 'ENOENT' || e.code === 'EACCES' || e.code === 'EROFS' ? `Can’t write to ${BACKUP_COPY_DIR}. Is the drive plugged in?`
+      : e.code === 'ENOSPC' || e.code === 'EDQUOT' ? `The backup drive (${BACKUP_COPY_DIR}) is full.` : e.message;
+    console.error('Backup copy:', e.message);
+  }
   return copyState;
 }
-const backupList = () => fs.readdirSync(BACKUP_DIR).filter(f => f.endsWith('.json')).sort().reverse()
+// Receipt photos never change (a new photo gets a new name), so each goes to the copy folder once.
+function copyPhotosOut(key) {
+  const dir = path.join(BACKUP_COPY_DIR, 'photos'); fs.mkdirSync(dir, { recursive: true });
+  for (const f of fs.readdirSync(PHOTO_DIR)) {
+    if (!/^[a-f0-9]{24}\.jpg$/.test(f)) continue;
+    const plain = path.join(dir, f), locked = plain + '.locked';
+    if (key) {
+      if (fs.existsSync(locked)) continue;
+      const tmp = locked + '.part'; fs.writeFileSync(tmp, lockBuf(fs.readFileSync(path.join(PHOTO_DIR, f)), key), { mode: 0o600 }); fs.renameSync(tmp, locked);
+      try { fs.unlinkSync(plain); } catch {}   // a passphrase was set later: the unlocked copy goes once the locked one is there
+    } else if (!fs.existsSync(plain) && !fs.existsSync(locked)) {
+      const tmp = plain + '.part'; fs.copyFileSync(path.join(PHOTO_DIR, f), tmp); fs.renameSync(tmp, plain);
+    }
+  }
+}
+const backupList = () => fs.readdirSync(BACKUP_DIR).filter(f => /^db-(weekly-)?\d{4}-\d\d-\d\d(-\d{4})?\.json$/.test(f))
+  .sort((a, b) => { const k = f => f.replace('weekly-', '').replace(/\.json$/, '').padEnd(18, '0'); return k(b).localeCompare(k(a)); })
   .map(f => { const st = fs.statSync(path.join(BACKUP_DIR, f)); return { file: f, bytes: st.size, at: st.mtimeMs }; });
+// How full the data folder's disk is, and what the owner should hear about now (shown on their page and as a banner).
+const diskUse = () => { try { const st = fs.statfsSync(DATA_DIR), total = st.blocks * st.bsize, free = st.bavail * st.bsize; return { free, total, used: total ? 1 - free / total : 0 }; } catch { return null; } };
+const whenText = t => new Date(t).toLocaleString('en-CA', { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+function ownerAlerts() {
+  const out = [], sp = storageProblem(), d = diskUse();
+  if (sp) out.push({ kind: 'disk', text: `Changes can’t be saved right now. ${sp}` });
+  else if (d && d.used >= 0.9) out.push({ kind: 'disk', text: `The laptop’s disk is ${Math.round(d.used * 100)}% full (${(d.free / 1e9).toFixed(1)} GB left). When it’s full, Split it can’t save anything new. Free some space soon.` });
+  for (const r of recovered) out.push({ kind: 'recovered', dismiss: true, text: `${r.file} was damaged when Split it started on ${whenText(r.at)}, so it was put back from the copy ${r.from}, taken ${whenText(r.copyAt)}. Anything added after that copy is missing: check recent expenses and add them again. The damaged file was kept as ${r.kept}.` });
+  if (backupState.error) out.push({ kind: 'backup', text: backupState.error });
+  return out;
+}
 // Photos stay with their expense. Once an expense has been in the bin for two years, its photo goes too.
 function prunePhotos() {
   const cutoff = Date.now() - PHOTO_KEEP_DELETED_DAYS * 864e5; let n = 0;
@@ -639,21 +799,33 @@ function prunePhotos() {
 // ---------- zip files (store only, no compression library needed) ----------
 const CRC_TABLE = (() => { const t = new Int32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c; } return t; })();
 const crc32 = buf => { let c = -1; for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xFF] ^ (c >>> 8); return (c ^ -1) >>> 0; };
-function zipWrite(entries) {   // entries: [{name, data: Buffer}]
-  const parts = [], central = []; let off = 0;
+// Writes a zip one entry at a time into a sink ({ write(buf), end() }), so a backup never sits whole in memory:
+// only one file (one photo) at a time. Store only. Plain zip, so it stops at 4 GB and 65535 files.
+function zipStream(sink) {
+  const central = []; let off = 0, count = 0;
   const d = new Date(), dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1), dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
-  for (const { name, data } of entries) {
-    const n = Buffer.from(name, 'utf8'), crc = crc32(data);
-    const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6); local.writeUInt16LE(0, 8);
-    local.writeUInt16LE(dosTime, 10); local.writeUInt16LE(dosDate, 12); local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26); local.writeUInt16LE(0, 28);
-    const c = Buffer.alloc(46); c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(0x800, 8); c.writeUInt16LE(0, 10);
-    c.writeUInt16LE(dosTime, 12); c.writeUInt16LE(dosDate, 14); c.writeUInt32LE(crc, 16); c.writeUInt32LE(data.length, 20); c.writeUInt32LE(data.length, 24); c.writeUInt16LE(n.length, 28);
-    c.writeUInt16LE(0, 30); c.writeUInt16LE(0, 32); c.writeUInt16LE(0, 34); c.writeUInt16LE(0, 36); c.writeUInt32LE(0, 38); c.writeUInt32LE(off, 42);
-    parts.push(local, n, data); central.push(c, n); off += local.length + n.length + data.length;
-  }
-  const cd = Buffer.concat(central), end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0, 4); end.writeUInt16LE(0, 6); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16); end.writeUInt16LE(0, 20);
-  return Buffer.concat([...parts, cd, end]);
+  return {
+    add(name, data) {
+      const n = Buffer.from(name, 'utf8'), crc = crc32(data);
+      if (off + 30 + n.length + data.length > 0xFFFFFFFF || count >= 0xFFFF) throw new Error('The backup is bigger than a zip can hold (4 GB). Copy the data folder by hand instead.');
+      const local = Buffer.alloc(30); local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x800, 6); local.writeUInt16LE(0, 8);
+      local.writeUInt16LE(dosTime, 10); local.writeUInt16LE(dosDate, 12); local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(n.length, 26); local.writeUInt16LE(0, 28);
+      const c = Buffer.alloc(46); c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(0x800, 8); c.writeUInt16LE(0, 10);
+      c.writeUInt16LE(dosTime, 12); c.writeUInt16LE(dosDate, 14); c.writeUInt32LE(crc, 16); c.writeUInt32LE(data.length, 20); c.writeUInt32LE(data.length, 24); c.writeUInt16LE(n.length, 28);
+      c.writeUInt16LE(0, 30); c.writeUInt16LE(0, 32); c.writeUInt16LE(0, 34); c.writeUInt16LE(0, 36); c.writeUInt32LE(0, 38); c.writeUInt32LE(off, 42);
+      sink.write(local); sink.write(n); sink.write(data); central.push(c, n); off += local.length + n.length + data.length; count++;
+    },
+    end() {
+      const cd = Buffer.concat(central), end = Buffer.alloc(22);
+      end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(0, 4); end.writeUInt16LE(0, 6); end.writeUInt16LE(count, 8); end.writeUInt16LE(count, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(off, 16); end.writeUInt16LE(0, 20);
+      sink.write(cd); sink.write(end); sink.end();
+    },
+  };
+}
+function zipWrite(entries) {   // entries: [{name, data: Buffer}] -> the zip in memory (small things and the tests)
+  const parts = [], z = zipStream({ write: b => parts.push(b), end() {} });
+  for (const { name, data } of entries) z.add(name, data);
+  z.end(); return Buffer.concat(parts);
 }
 function zipRead(buf) {   // -> { name: Buffer }, understands stored and deflated entries
   let i = buf.length - 22; while (i >= 0 && buf.readUInt32LE(i) !== 0x06054b50) i--;
@@ -669,38 +841,176 @@ function zipRead(buf) {   // -> { name: Buffer }, understands stored and deflate
   }
   return out;
 }
-function backupZip() {
-  flushDb();
-  const entries = [];
-  for (const f of ['db.json', 'users.json', 'push.json', 'push-keys.json', 'oauth.json', 'claims.json']) { const fp = path.join(DATA_DIR, f); if (fs.existsSync(fp)) entries.push({ name: f, data: fs.readFileSync(fp) }); }
-  for (const f of fs.readdirSync(PHOTO_DIR)) if (f.endsWith('.jpg')) entries.push({ name: 'photos/' + f, data: fs.readFileSync(path.join(PHOTO_DIR, f)) });
-  entries.push({ name: 'README.txt', data: Buffer.from(`Split it backup, ${new Date().toISOString()}\nTo restore: in the app, tap your picture, Run Split it, Restore a backup. Or stop the server and copy these files into its data folder.\n`) });
-  return zipWrite(entries);
+// ---------- locked backups ----------
+// The same layout Budget it uses: a 6-byte mark, 16 bytes of salt, a 12-byte nonce, a 16-byte seal, then the zip encrypted
+// with AES-256-GCM. The key comes from the passphrase through scrypt, so guessing is slow. Split it's mark is SIBK1,
+// Budget it's is BIBK1, so a backup of one app put into the other gets a plain answer.
+const LOCK_MAGIC = Buffer.from('SIBK1\n'), BUDGET_MAGIC = Buffer.from('BIBK1\n'), LOCK_HEAD = 6 + 16 + 12 + 16;
+const lockKey = (pass, salt) => crypto.scryptSync(String(pass), salt, 32, { N: 1 << 15, r: 8, p: 1, maxmem: 96 * 1024 * 1024 });
+const lockSession = pass => { const salt = crypto.randomBytes(16); return { salt, key: lockKey(pass, salt) }; };
+const lockedError = msg => Object.assign(new Error(msg), { locked: true });
+function lockBuf(buf, k) {   // k: a lockSession
+  const iv = crypto.randomBytes(12), c = crypto.createCipheriv('aes-256-gcm', k.key, iv);
+  const enc = Buffer.concat([c.update(buf), c.final()]);
+  return Buffer.concat([LOCK_MAGIC, k.salt, iv, c.getAuthTag(), enc]);
 }
-function restoreZip(buf) {
-  const files = zipRead(buf);
-  if (!files['db.json']) throw new Error('That zip has no db.json in it.');
-  const next = JSON.parse(files['db.json'].toString('utf8'));
-  if (!next || !next.docs || typeof next.docs !== 'object' || Array.isArray(next.docs)) throw new Error('db.json in that zip doesn’t look like Split it data.');
-  let nextUsers = null;
-  if (files['users.json']) { nextUsers = JSON.parse(files['users.json'].toString('utf8')); if (!nextUsers.users) throw new Error('users.json in that zip doesn’t look right.'); }
-  // keep what we have first, so a restore can itself be undone
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  flushDb();
-  for (const f of ['db.json', 'users.json', 'push.json']) { const fp = path.join(DATA_DIR, f); if (fs.existsSync(fp)) fs.copyFileSync(fp, path.join(BACKUP_DIR, `before-restore-${stamp}-${f}`)); }
-  db = next; dbDirty = true; flushDb();
-  // Sessions are not restored: the ones signed out since the backup stay signed out, and current ones keep working if that person is still there.
-  if (nextUsers) { const now = users.sessions || {}; users = nextUsers; users.sessions = {}; users.sessionsHashed = true;
-    for (const [t, s] of Object.entries(now)) if (userOf(s.uid)) users.sessions[t] = s;
-    saveUsers(); }
-  if (files['push-keys.json']) { try { const k = JSON.parse(files['push-keys.json'].toString('utf8')); if (k.publicKey && k.privateJwk) { fs.writeFileSync(PUSH_KEYS_FILE, files['push-keys.json']); pushKeys = push.loadKeys(PUSH_KEYS_FILE); } } catch {} }
-  if (files['push.json']) { try { pushes = JSON.parse(files['push.json'].toString('utf8')); savePushes(); } catch {} }
-  if (files['oauth.json']) fs.writeFileSync(path.join(DATA_DIR, 'oauth.json'), files['oauth.json']);
-  if (files['claims.json']) { fs.writeFileSync(path.join(DATA_DIR, 'claims.json'), files['claims.json']); claims.reload(); }
-  let photos = 0;
-  for (const [name, data] of Object.entries(files)) if (/^photos\/[a-f0-9]{24}\.jpg$/.test(name)) { fs.writeFileSync(path.join(PHOTO_DIR, name.slice(7)), data); photos++; }
-  tellEveryone('reload', { why: 'restore' });
-  return { docs: Object.keys(db.docs).length, users: nextUsers ? Object.keys(nextUsers.users).length : null, photos };
+const isLocked = buf => buf.length > LOCK_HEAD && buf.subarray(0, 6).equals(LOCK_MAGIC);
+function unlockBuf(buf, pass, keys = new Map()) {   // keys: salt -> key, so files locked in one run cost one scrypt
+  if (!pass) throw lockedError('This backup is locked. Enter its passphrase.');
+  const salt = buf.subarray(6, 22), id = salt.toString('hex');
+  if (!keys.has(id)) keys.set(id, lockKey(pass, salt));
+  const d = crypto.createDecipheriv('aes-256-gcm', keys.get(id), buf.subarray(22, 34)); d.setAuthTag(buf.subarray(34, 50));
+  try { return Buffer.concat([d.update(buf.subarray(LOCK_HEAD)), d.final()]); } catch { throw lockedError('That passphrase doesn’t open this backup.'); }
+}
+const readAt = (fd, len, pos) => { const b = Buffer.alloc(len); let got = 0; while (got < len) { const n = fs.readSync(fd, b, got, len - got, pos + got); if (!n) break; got += n; } return got === len ? b : b.subarray(0, got); };
+const fileHead = (file, n) => { const fd = fs.openSync(file, 'r'); try { return readAt(fd, n, 0); } finally { fs.closeSync(fd); } };
+const isLockedFile = file => { try { return fileHead(file, 6).equals(LOCK_MAGIC); } catch { return false; } };
+// Where a backup is written: straight to a file, locked on the way when there's a passphrase. The seal is only known
+// at the end, so its place in the header is filled in last.
+function fileSink(file, pass, k) {
+  const fd = fs.openSync(file, 'w', 0o600);
+  const raw = buf => { let o = 0; while (o < buf.length) o += fs.writeSync(fd, buf, o, buf.length - o); };
+  let cipher = null;
+  if (pass) { k = k || lockSession(pass); const iv = crypto.randomBytes(12); cipher = crypto.createCipheriv('aes-256-gcm', k.key, iv); raw(Buffer.concat([LOCK_MAGIC, k.salt, iv, Buffer.alloc(16)])); }
+  return {
+    write(buf) { const b = cipher ? cipher.update(buf) : buf; if (b.length) raw(b); },
+    end() { if (cipher) { const f = cipher.final(); if (f.length) raw(f); fs.writeSync(fd, cipher.getAuthTag(), 0, 16, 34); } fs.fsyncSync(fd); fs.closeSync(fd); },
+    abort() { try { fs.closeSync(fd); } catch {} try { fs.unlinkSync(file); } catch {} },
+  };
+}
+// What a backup holds. Left out on purpose: sign-ins (sessions) and open invite links, which could be used to get in,
+// one-time assistant sign-in codes, and phone notification subscriptions and their sending key (phones turn
+// notifications on again after a move). A restore keeps the ones this laptop has now.
+const BACKUP_FILES = ['db.json', 'users.json', 'oauth.json', 'claims.json'];
+function backupBytes(name) {
+  const fp = path.join(DATA_DIR, name); if (!fs.existsSync(fp)) return null;
+  const buf = fs.readFileSync(fp);
+  try {
+    if (name === 'users.json') { const u = JSON.parse(buf.toString('utf8')); u.sessions = {}; delete u.invites; return Buffer.from(JSON.stringify(u)); }
+    if (name === 'oauth.json') { const o = JSON.parse(buf.toString('utf8')); if (o && o.codes) o.codes = {}; return Buffer.from(JSON.stringify(o)); }
+  } catch {}
+  return buf;
+}
+// A full backup written to a file as it's made (photos one at a time), then put in place. Throws on a full disk.
+function writeBackup(file, { photos = true, pass = '', key = null } = {}) {
+  if (!flushDb()) throw diskError(Object.assign(new Error('db.json couldn’t be saved'), { code: storage.failing['db.json']?.code }));
+  if (!fs.existsSync(DB_FILE)) save(DB_FILE, db);   // a brand-new install: a backup still holds a (nearly empty) records file
+  const tmp = file + '.part', sink = fileSink(tmp, pass, key);
+  try {
+    const z = zipStream(sink);
+    for (const f of BACKUP_FILES) { const b = backupBytes(f); if (b) z.add(f, b); }
+    let n = 0;
+    if (photos) for (const f of fs.readdirSync(PHOTO_DIR)) if (/^[a-f0-9]{24}\.jpg$/.test(f)) { z.add('photos/' + f, fs.readFileSync(path.join(PHOTO_DIR, f))); n++; }
+    z.add('README.txt', Buffer.from(`Split it backup, ${new Date().toString()}\n`
+      + (photos ? '' : 'Receipt photos are not in this file: they are in the photos folder next to it, each copied once.\n')
+      + 'To restore: on the laptop, run  node server.js restore THIS-FILE  (it finds the photos folder next to it by itself),\n'
+      + 'or in the app: tap your picture, People, backups and health, Restore a backup.\n'
+      + 'Sign-ins are not in a backup, so after a restore on a new laptop everyone signs in again with their password.\n'));
+    z.end();
+    fs.renameSync(tmp, file);
+    return { photos: n };
+  } catch (e) { sink.abort(); throw diskError(e); }
+}
+
+// ---------- restoring ----------
+// Reads a zip from a file without loading all of it: the list first, then one entry at a time.
+function zipOpen(fd) {
+  const size = fs.fstatSync(fd).size, tailLen = Math.min(size, 22 + 65535), tail = readAt(fd, tailLen, size - tailLen);
+  let i = tail.length - 22; while (i >= 0 && tail.readUInt32LE(i) !== 0x06054b50) i--;
+  if (i < 0) throw new Error('That file isn’t a Split it backup (it isn’t a zip).');
+  const count = tail.readUInt16LE(i + 10), cdSize = tail.readUInt32LE(i + 12), cdOff = tail.readUInt32LE(i + 16);
+  if (cdOff + cdSize > size) throw new Error('That backup is cut short or damaged.');
+  const cd = readAt(fd, cdSize, cdOff), entries = new Map(); let p = 0;
+  for (let k = 0; k < count; k++) {
+    if (p + 46 > cd.length || cd.readUInt32LE(p) !== 0x02014b50) throw new Error('That backup is damaged.');
+    const method = cd.readUInt16LE(p + 10), csize = cd.readUInt32LE(p + 20), nlen = cd.readUInt16LE(p + 28), xlen = cd.readUInt16LE(p + 30), clen = cd.readUInt16LE(p + 32), lo = cd.readUInt32LE(p + 42);
+    const name = cd.subarray(p + 46, p + 46 + nlen).toString('utf8');
+    if (!name.endsWith('/')) entries.set(name, { method, csize, lo });
+    p += 46 + nlen + xlen + clen;
+  }
+  const read = name => {
+    const e = entries.get(name); if (!e) return null;
+    const h = readAt(fd, 30, e.lo); if (h.length < 30 || h.readUInt32LE(0) !== 0x04034b50) throw new Error('That backup is damaged.');
+    const raw = readAt(fd, e.csize, e.lo + 30 + h.readUInt16LE(26) + h.readUInt16LE(28));
+    if (e.method === 8) return zlib.inflateRawSync(raw);
+    if (e.method === 0) return raw;
+    throw new Error('That zip uses a kind of compression this can’t read.');
+  };
+  return { names: [...entries.keys()], read };
+}
+// A locked file, unlocked into a work file a piece at a time. Nothing is used unless the seal checks out at the end.
+function unlockFile(src, pass, dest) {
+  const fd = fs.openSync(src, 'r');
+  try {
+    const head = readAt(fd, LOCK_HEAD, 0);
+    if (!pass) throw lockedError('This backup is locked. Enter its passphrase.');
+    const d = crypto.createDecipheriv('aes-256-gcm', lockKey(pass, head.subarray(6, 22)), head.subarray(22, 34)); d.setAuthTag(head.subarray(34, 50));
+    const out = fs.openSync(dest, 'w', 0o600);
+    try {
+      const write = b => { let o = 0; while (o < b.length) o += fs.writeSync(out, b, o, b.length - o); };
+      for (let pos = LOCK_HEAD; ;) { const chunk = readAt(fd, 1 << 20, pos); if (!chunk.length) break; write(d.update(chunk)); pos += chunk.length; }
+      try { write(d.final()); } catch { throw lockedError('That passphrase doesn’t open this backup.'); }
+    } finally { fs.closeSync(out); }
+  } finally { fs.closeSync(fd); }
+}
+// Put a backup back: a full zip, a locked one, or a plain db.json (one of the daily copies). Everything is read and
+// checked first, and what is here now is kept in data/backups (before-restore-...), so a restore can itself be undone.
+// photosDir: a folder of photos to bring back too (the photos/ folder next to a copy off the laptop).
+function restoreFile(file, pass = '', { photosDir = null } = {}) {
+  let src = file, tmp = null, fd = null;
+  try {
+    const head = fileHead(file, 8);
+    if (head.subarray(0, 6).equals(BUDGET_MAGIC)) throw new Error('That’s a Budget it backup, not a Split it one.');
+    if (head.subarray(0, 6).equals(LOCK_MAGIC)) { if (!pass) throw lockedError('This backup is locked. Enter its passphrase.'); tmp = workFile('unlocked'); unlockFile(file, pass, tmp); src = tmp; }
+    const got = {};
+    const parse = (name, buf) => { try { return JSON.parse(buf.toString('utf8').replace(/^﻿/, '')); } catch { throw new Error(`${name} in that backup is damaged, so nothing was changed.`); } };
+    let zip = null;
+    if (/^\s*[{[]/.test(fileHead(src, 8).toString('utf8').replace(/^﻿/, ''))) got.db = parse('That file', fs.readFileSync(src));   // a plain db.json
+    else {
+      fd = fs.openSync(src, 'r'); zip = zipOpen(fd);
+      const d = zip.read('db.json'); if (!d) throw new Error('That backup has no db.json in it, so nothing was changed.');
+      got.db = parse('db.json', d);
+      const u = zip.read('users.json'); if (u) got.users = parse('users.json', u);
+      const o = zip.read('oauth.json'); if (o) { parse('oauth.json', o); got.oauth = o; }
+      const cl = zip.read('claims.json'); if (cl) { parse('claims.json', cl); got.claims = cl; }
+      const pk = zip.read('push-keys.json'); if (pk) try { const k = JSON.parse(pk.toString('utf8')); if (k.publicKey && k.privateJwk) got.pushKeys = pk; } catch {}
+      const pj = zip.read('push.json'); if (pj) try { const x = JSON.parse(pj.toString('utf8')); if (isPlainObject(x)) got.push = x; } catch {}
+    }
+    const bad = dataProblem(got.db); if (bad) throw new Error(`That can’t be restored: ${bad}. Nothing was changed.`);
+    const badU = got.users && usersProblem(got.users); if (badU) throw new Error(`That can’t be restored: in users.json ${badU}. Nothing was changed.`);
+    // keep what we have first (if the disk is full this fails here, before anything is replaced)
+    if (!flushDb()) throw diskError(Object.assign(new Error('db.json couldn’t be saved'), { code: storage.failing['db.json']?.code }));
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    try { for (const f of ['db.json', 'users.json', 'push.json', 'oauth.json', 'claims.json']) { const fp = path.join(DATA_DIR, f); if (fs.existsSync(fp)) fs.copyFileSync(fp, path.join(BACKUP_DIR, `before-restore-${stamp}-${f}`)); } }
+    catch (e) { throw diskError(e); }
+    const was = db; db = got.db; dbDirty = true;
+    if (!flushDb()) { db = was; dbDirty = false; throw diskError(Object.assign(new Error('db.json couldn’t be saved'), { code: storage.failing['db.json']?.code })); }
+    // Sign-ins and open invites are not in a backup: the ones here now keep working if that person is still there.
+    if (got.users) { const now = users; users = got.users; users.sessions = {}; users.sessionsHashed = true;
+      for (const [t, s] of Object.entries(now.sessions || {})) if (userOf(s.uid)) users.sessions[t] = s;
+      if (!users.invites && now.invites) users.invites = now.invites;
+      saveUsers(); }
+    if (got.pushKeys) { fs.writeFileSync(PUSH_KEYS_FILE, got.pushKeys, { mode: 0o600 }); pushKeys = push.loadKeys(PUSH_KEYS_FILE); }
+    if (got.push) { pushes = { subs: {}, ...got.push }; savePushes(); }
+    if (got.oauth) fs.writeFileSync(path.join(DATA_DIR, 'oauth.json'), got.oauth, { mode: 0o600 });
+    if (got.claims) { fs.writeFileSync(path.join(DATA_DIR, 'claims.json'), got.claims, { mode: 0o600 }); claims.reload(); }
+    let photos = 0;
+    if (zip) for (const name of zip.names) if (/^photos\/[a-f0-9]{24}\.jpg$/.test(name)) { fs.writeFileSync(path.join(PHOTO_DIR, name.slice(7)), zip.read(name)); photos++; }
+    if (photosDir && fs.existsSync(photosDir)) {
+      const keys = new Map();
+      for (const f of fs.readdirSync(photosDir)) {
+        const m = f.match(/^([a-f0-9]{24}\.jpg)(\.locked)?$/); if (!m) continue;
+        const to = path.join(PHOTO_DIR, m[1]); if (fs.existsSync(to)) continue;
+        try { const b = fs.readFileSync(path.join(photosDir, f)); fs.writeFileSync(to, m[2] ? unlockBuf(b, pass, keys) : b); photos++; }
+        catch (e) { if (!e.locked) throw e; }   // a photo locked with another passphrase is skipped
+      }
+    }
+    tellEveryone('reload', { why: 'restore' });
+    return { docs: Object.keys(db.docs).length, users: got.users ? Object.keys(got.users.users).length : null, photos };
+  } finally {
+    if (fd != null) try { fs.closeSync(fd); } catch {}
+    if (tmp) try { fs.unlinkSync(tmp); } catch {}
+  }
 }
 
 // ---------- is there a newer Split it? ----------
@@ -854,8 +1164,7 @@ function billMode(r) {   // older bills stored mode/weights/exact instead of spl
   if (r.mode === 'shares') return ['shares', { shares: { ...(r.weights || {}) } }];
   return ['equal', { ids: Object.keys(r.weights || {}) }];
 }
-const pad2 = n => String(n).padStart(2, '0');
-const ymd = d => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+const ymd = localDay;   // a date's day in the TZ time zone (pad2 and localDay are up with the settings)
 const nextYm = ym => { let [y, m] = ym.split('-').map(Number); m++; if (m > 12) { m = 1; y++; } return y + '-' + pad2(m); };
 const daysIn = ym => { const [y, m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); };
 const addDays = (s, n) => { const d = new Date(s + 'T12:00:00'); d.setDate(d.getDate() + n); return ymd(d); };
@@ -876,7 +1185,7 @@ function billDate(r, key) {
   return `${key}-${pad2(Math.min(r.day || 1, daysIn(key)))}`;
 }
 function postDueBills() {
-  const today = ymd(new Date()), changed = [];
+  const today = localDay(), changed = [];
   for (const [k, r] of Object.entries(db.docs)) {
     const s = segs(k);
     if (s[0] !== 'recurring' || s.length !== 2 || !r || r.paused || !r.groupId || !r.paidBy) continue;
@@ -1078,7 +1387,7 @@ function icsFor(uid) {
   const ev = (id, date, title, desc) => { const d = date.replace(/-/g, ''); const next = addDays(date, 1).replace(/-/g, '');
     return `BEGIN:VEVENT\r\nUID:${id}@split-it\r\nDTSTAMP:${new Date().toISOString().replace(/[-:]/g, '').slice(0, 15)}Z\r\nDTSTART;VALUE=DATE:${d}\r\nDTEND;VALUE=DATE:${next}\r\nSUMMARY:${esc(title)}\r\nDESCRIPTION:${esc(desc)}\r\nEND:VEVENT\r\n`; };
   let out = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Budget it//Split it//EN\r\nCALSCALE:GREGORIAN\r\nX-WR-CALNAME:Split it\r\nREFRESH-INTERVAL;VALUE=DURATION:PT12H\r\n';
-  const today = ymd(new Date());
+  const today = localDay();
   for (const [k, r] of Object.entries(db.docs)) {
     const s = segs(k);
     if (s[0] !== 'recurring' || s.length !== 2 || !r || r.paused || !gid.has(r.groupId)) continue;
@@ -1126,6 +1435,16 @@ const readRaw = (req, limit) => new Promise((res, rej) => {
   let n = 0; const chunks = [];
   req.on('data', c => { n += c.length; if (n > limit) { rej(new Error('too big')); req.destroy(); } else chunks.push(c); });
   req.on('end', () => res(Buffer.concat(chunks)));
+});
+// A request body written straight to a file (backups to restore can be hundreds of MB).
+const receiveToFile = (req, file, limit) => new Promise((res, rej) => {
+  let n = 0, done = false; const ws = fs.createWriteStream(file, { mode: 0o600 });
+  const fail = e => { if (done) return; done = true; ws.destroy(); req.resume(); rej(e); };
+  ws.on('error', fail); req.on('error', fail);
+  req.on('data', c => { if (done) return; n += c.length;
+    if (n > limit) return fail(Object.assign(new Error('That file is too big to send through the website. Use  node server.js restore FILE  on the laptop.'), { tooBig: true }));
+    if (!ws.write(c)) { req.pause(); ws.once('drain', () => req.resume()); } });
+  req.on('end', () => { if (done) return; ws.end(); ws.on('close', () => { if (!done) { done = true; res(n); } }); });
 });
 // Files from public/, cached in memory and sent with an ETag so a phone that already has them gets a tiny 304.
 const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.webmanifest': 'application/manifest+json',
@@ -1204,7 +1523,7 @@ async function handle(req, res) {
     res.writeHead(302, { Location: '/login' }); return res.end();
   }
   const me = userOf(uid);
-  if (!me.lastSeen || Date.now() - me.lastSeen > 3600e3) { me.lastSeen = Date.now(); saveUsers(); }
+  if (!me.lastSeen || Date.now() - me.lastSeen > 3600e3) { me.lastSeen = Date.now(); try { saveUsers(); } catch {} }   // a full disk mustn't stop reading
 
   if (p === '/' || p === '/index.html') return file(res, 'index.html', null, 'private, no-cache');
   if (p === '/shim.js') return file(res, 'shim.js', null, 'private, no-cache');
@@ -1214,12 +1533,13 @@ async function handle(req, res) {
   // ---------- receipt photos ----------
   if (p === '/api/photo' && req.method === 'POST') {
     if (!/^image\/jpeg/.test(req.headers['content-type'] || '')) return send(res, 400, { error: 'jpeg only' });
-    const key = uid + '|' + ymd(new Date()), n = photoCount.get(key) || 0;
+    const key = uid + '|' + localDay(), n = photoCount.get(key) || 0;
     if (n >= PHOTOS_PER_DAY) return send(res, 429, { error: `That’s ${PHOTOS_PER_DAY} photos today. Try again tomorrow.` });
     const buf = await readRaw(req, 6e6);
     if (buf.length < 100 || buf[0] !== 0xff || buf[1] !== 0xd8) return send(res, 400, { error: 'not a jpeg' });
     const id = crypto.randomBytes(12).toString('hex');
-    fs.writeFileSync(path.join(PHOTO_DIR, id + '.jpg'), buf);
+    try { fs.writeFileSync(path.join(PHOTO_DIR, id + '.jpg'), buf); }
+    catch (e) { try { fs.unlinkSync(path.join(PHOTO_DIR, id + '.jpg')); } catch {} return send(res, 507, { error: diskMessage(e) }); }
     photoCount.set(key, n + 1); if (photoCount.size > 500) photoCount.clear();
     return send(res, 200, { id });
   }
@@ -1295,11 +1615,12 @@ async function handle(req, res) {
       const people = Object.entries(users.users).map(([id, u]) => ({ id, name: u.name, nickname: db.docs['people/' + id]?.nickname || null, owner: !!u.owner, email: u.emailVerified ? u.email : null,
         hasPassword: !!u.hash, google: !!u.google, code: accounts.needsCode(id), createdAt: u.createdAt || null, lastSeen: u.lastSeen || null, push: pushOn(id), sessions: sessions[id] || 0, mcp: mcp.connected(id) }));
       let photos = 0, photoBytes = 0; for (const f of fs.readdirSync(PHOTO_DIR)) { try { photoBytes += fs.statSync(path.join(PHOTO_DIR, f)).size; photos++; } catch {} }
-      let disk = null; try { const st = fs.statfsSync(DATA_DIR); disk = { free: st.bavail * st.bsize, total: st.blocks * st.bsize }; } catch {}
+      const disk = diskUse();
       const invites = Object.values(users.invites || {}).filter(v => !v.used && v.exp > Date.now()).length;
-      return send(res, 200, { people, backups: backupList().slice(0, 40), invites,
+      return send(res, 200, { people, backups: backupList().slice(0, 40), invites, alerts: ownerAlerts(),
         health: { version: VERSION, node: process.version, uptime: Date.now() - STARTED, dbBytes: fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size : 0, docs: Object.keys(db.docs).length,
-          photos, photoBytes, disk, lastBillRun, lastBackupAt, remindHour: REMIND_HOUR, copyDir: BACKUP_COPY_DIR, copyAt: copyState.at, copyError: copyState.error, publicUrl: process.env.PUBLIC_URL || null, email: !!process.env.RESEND_API_KEY, google: !!process.env.GOOGLE_CLIENT_ID, listeners: listeners.size, dataDir: DATA_DIR } });
+          photos, photoBytes, disk, lastBillRun, lastBackupAt, backupError: backupState.error, remindHour: REMIND_HOUR, copyDir: BACKUP_COPY_DIR, copyAt: copyState.at, copyError: copyState.error, copyLocked: !!BACKUP_PASSPHRASE,
+          timeZone: serverZone(), tzSet: !!process.env.TZ, serverTime: localStamp(), publicUrl: process.env.PUBLIC_URL || null, email: !!process.env.RESEND_API_KEY, google: !!process.env.GOOGLE_CLIENT_ID, listeners: listeners.size, dataDir: DATA_DIR } });
     }
     if (p === '/api/admin/reset-link' && req.method === 'POST') {
       const { id } = await readBody(req); if (!userOf(id)) return send(res, 404, { error: 'No such person.' });
@@ -1338,27 +1659,37 @@ async function handle(req, res) {
       return st.error ? send(res, 500, { error: st.error }) : send(res, 200, { ok: true, at: st.at });
     }
     if (p === '/api/admin/update') return send(res, 200, await latestRelease());
-    if (p === '/api/admin/backup') {
-      const stamp = new Date().toISOString().slice(0, 10);
-      return out(res, 200, { 'Content-Type': 'application/zip', 'Content-Disposition': `attachment; filename="split-it-backup-${stamp}.zip"`, 'Cache-Control': 'no-store' }, backupZip());
+    if (p === '/api/admin/alerts' && req.method === 'GET') return send(res, 200, { alerts: ownerAlerts() });
+    if (p === '/api/admin/alerts/dismiss' && req.method === 'POST') { recovered = []; try { fs.unlinkSync(RECOVERED_FILE); } catch {} return send(res, 200, { ok: true }); }
+    if (p === '/api/admin/backup' && (req.method === 'GET' || req.method === 'POST')) {
+      // GET ?lock=1 locks it with BACKUP_PASSPHRASE; POST {passphrase} locks it with one typed in. Written to disk, then sent.
+      let pass = '';
+      if (req.method === 'POST') { const { passphrase } = await readBody(req); pass = String(passphrase || ''); if (pass.length < 8) return send(res, 400, { error: 'Use at least 8 characters for the passphrase.' }); }
+      else if (url.searchParams.get('lock') === '1') { if (!BACKUP_PASSPHRASE) return send(res, 400, { error: 'No BACKUP_PASSPHRASE is set.' }); pass = BACKUP_PASSPHRASE; }
+      const tmp = workFile('download');
+      try { writeBackup(tmp, { pass }); } catch (e) { return send(res, e.storage && /^E(NOSPC|DQUOT|ROFS|IO)$/.test(e.code || '') ? 507 : 500, { error: e.storage ? e.storageMessage : e.message }); }
+      res.writeHead(200, { ...SECURITY, 'Content-Type': pass ? 'application/octet-stream' : 'application/zip', 'Content-Length': fs.statSync(tmp).size,
+        'Content-Disposition': `attachment; filename="split-it-backup-${localDay()}.${pass ? 'locked' : 'zip'}"`, 'Cache-Control': 'no-store' });
+      const rs = fs.createReadStream(tmp), gone = () => fs.rm(tmp, { force: true }, () => {});
+      rs.on('error', () => res.destroy()); res.on('close', gone); rs.pipe(res);
+      return;
     }
-    const bk = p.match(/^\/api\/admin\/backup\/(db(?:-weekly)?-\d{4}-\d\d-\d\d\.json)$/);
+    const bk = p.match(/^\/api\/admin\/backup\/(db(?:-weekly)?-\d{4}-\d\d-\d\d(?:-\d{4})?\.json)$/);
     if (bk) { const fp = path.join(BACKUP_DIR, bk[1]); if (!fs.existsSync(fp)) return send(res, 404, { error: 'not found' });
       return out(res, 200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="${bk[1]}"`, 'Cache-Control': 'no-store' }, fs.readFileSync(fp)); }
     if (p === '/api/admin/restore' && req.method === 'POST') {
-      const buf = await readRaw(req, 400e6);
+      // The upload goes to a work file as it arrives, then restoreFile checks all of it before anything is replaced.
+      let pass = ''; try { pass = decodeURIComponent(String(req.headers['x-backup-passphrase'] || '')); } catch {}
+      const tmp = workFile('upload');
       try {
-        const name = url.searchParams.get('name') || '';
-        let r;
-        if (/\.json$/i.test(name) || buf[0] === 0x7b) {   // a plain db.json, for example one of the daily backups
-          const next = JSON.parse(buf.toString('utf8')); if (!next || typeof next.docs !== 'object') throw new Error('That file doesn’t look like Split it data.');
-          const stamp = new Date().toISOString().replace(/[:.]/g, '-'); flushDb();
-          if (fs.existsSync(DB_FILE)) fs.copyFileSync(DB_FILE, path.join(BACKUP_DIR, `before-restore-${stamp}-db.json`));
-          db = next; dbDirty = true; flushDb(); tellEveryone('reload', { why: 'restore' });
-          r = { docs: Object.keys(db.docs).length, users: null, photos: 0 };
-        } else r = restoreZip(buf);
+        try { await receiveToFile(req, tmp, 400e6); } catch (e) { return send(res, e.tooBig ? 413 : 507, { error: e.tooBig ? e.message : diskMessage(e) }); }
+        const r = restoreFile(tmp, pass);
         return send(res, 200, { ok: true, ...r });
-      } catch (e) { return send(res, 400, { error: e.message || 'Couldn’t restore that.' }); }
+      } catch (e) {
+        if (e.locked) return send(res, 401, { error: e.message, locked: true });
+        if (e.storage || /^E(NOSPC|DQUOT|ROFS|IO)$/.test(e.code || '')) return send(res, 507, { error: diskMessage(e) });
+        return send(res, 400, { error: e.message || 'Couldn’t restore that.' });
+      } finally { fs.rm(tmp, { force: true }, () => {}); }
     }
     if (p === '/api/admin/test-push' && req.method === 'POST') { const n = await notify(Object.keys(users.users), { title: 'Split it check', body: `${nameFor(uid)} is checking that notifications work.`, tag: 'admin-test' }); return send(res, 200, { sent: n }); }
     return send(res, 404, { error: 'not found' });
@@ -1437,7 +1768,7 @@ const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveD
   session: req => { const t = cookies(req).hs, s = sessionGet(users, t); return s && s.exp > Date.now() && userOf(s.uid) ? { uid: s.uid, key: sessionKey(t), name: users.users[s.uid].name } : null; } });
 
 // The split engine and balance rules, for the tests (node --test test/*.test.js).
-module.exports = { ipBytes, trustList, makeClientIp, isLocalReq, fromElsewhere, splitEqual, splitShares, itemsSplit, computeSplit, netOf, pairwiseOf, simplified, billDate, billNextKey, billFirstKey, billDueOn, zipWrite, zipRead, crc32, newerThan };
+module.exports = { ipBytes, trustList, makeClientIp, isLocalReq, fromElsewhere, splitEqual, splitShares, itemsSplit, computeSplit, netOf, pairwiseOf, simplified, billDate, billNextKey, billFirstKey, billDueOn, zipWrite, zipRead, crc32, newerThan, lockBuf, lockSession, unlockBuf, isLocked, dataProblem, localDay };
 
 if (require.main === module) {
   if (process.argv[2]) {
@@ -1446,10 +1777,12 @@ if (require.main === module) {
     if (!Object.keys(users.users).length) console.log('No users yet. Add one with: node server.js add-user YOURNAME');
     if (+process.versions.node.split('.')[0] < 22) console.log(`Heads-up: this is Node ${process.version}. Split it is tested on Node 22 and 24; older ones no longer get security fixes.`);
     claimLock(); process.on('exit', dropLock);
-    backup(); setInterval(backup, 60 * 60e3);
+    for (const f of fs.readdirSync(WORK_DIR)) fs.rm(path.join(WORK_DIR, f), { force: true }, () => {});   // left by a crash
+    if (process.env.TZ === undefined && serverZone() === 'UTC') console.log('Heads-up: the clock here is on UTC. Set TZ (for example TZ=America/Toronto) so reminders and "today" follow your time.');
+    backup(true); setInterval(() => backup(false), 60 * 60e3);   // a copy at every start, then every 6 hours
     setInterval(() => billReminders().catch(e => console.error(e)), 10 * 60e3); setTimeout(() => billReminders().catch(e => console.error(e)), 5000);
     setInterval(() => { for (const res of listeners.keys()) res.write(': ping\n\n'); }, 25000);
-    http.createServer((req, res) => handle(req, res).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, { error: 'server error' }); }))
+    http.createServer((req, res) => handle(req, res).catch(e => { console.error(e); if (!res.headersSent) e && e.storage ? send(res, 507, { error: e.storageMessage }) : send(res, 500, { error: 'server error' }); }))
       .listen(PORT, HOST, () => console.log(`Split it ${VERSION} running at http://${HOST}:${PORT}`));
   }
 }

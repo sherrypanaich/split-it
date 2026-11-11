@@ -1242,7 +1242,7 @@ function render(){
   if(S.page?.type==='group') html = S.groups[S.page.id] ? viewGroup(S.page.id) : pageBar('groups','groups','Opening group…');
   else if(S.page?.type==='friend') html = viewFriend(S.page.id);
   else { S.page = null; html = ({home:viewHome, groups:viewGroups, friends:viewFriends, activity:viewActivity})[S.tab](); }
-  app.innerHTML = (!canWrite ? `<div class="banner">You can look around, but you need Contributor or Editor access to add anything. ${LAPTOP?'Ask whoever runs Split it to give you access.':'Ask whoever shared this to change it in the Share menu.'}</div>` : '') + html;
+  app.innerHTML = ownerBanner() + (!canWrite ? `<div class="banner">You can look around, but you need Contributor or Editor access to add anything. ${LAPTOP?'Ask whoever runs Split it to give you access.':'Ask whoever shared this to change it in the Share menu.'}</div>` : '') + html;
   bind();
   animateNums(app, false);
   playNav();
@@ -1338,6 +1338,7 @@ function pokeGuide(g){
 function bind(){
   const on = (sel, ev, fn) => app.querySelectorAll(sel).forEach(el => el[ev] = fn.bind(null, el));
   on('[data-back]','onclick',el=>go(el.dataset.back));
+  on('#ownAlertOpen','onclick',()=>openAdmin());
   on('[data-group]','onclick',el=>go('groups',{type:'group',id:el.dataset.group}));
   on('[data-friend]','onclick',el=>go('friends',{type:'friend',id:el.dataset.friend}));
   on('[data-exp]','onclick',el=>openDetail(el.dataset.exp, el.dataset.priv==='1'));
@@ -3867,6 +3868,10 @@ function listenQuick(btn, input){
   try{ r.start(); buzz(8); }catch(e){ btn.classList.remove('on'); }
 }
 /* ================= running it: the owner's admin page (laptop only) ================= */
+// Things the owner must hear about even without opening that page: a full disk, a damaged file put back from a copy, a failed backup.
+let ownerAlerts = [];
+function loadOwnerAlerts(){ fetch('/api/admin/alerts').then(r => r.ok ? r.json() : {alerts:[]}).then(j => { const was = JSON.stringify(ownerAlerts); ownerAlerts = j.alerts || []; if(JSON.stringify(ownerAlerts) !== was) schedule(); }).catch(()=>{}); }
+const ownerBanner = () => !ownerAlerts.length ? '' : `<div class="banner" role="alert">${ownerAlerts.map(a => esc(a.text)).join('<br>')} <button class="link" id="ownAlertOpen" style="padding:0">Open Run Split it</button></div>`;
 const fmtBytes = b => b >= 1e9 ? (b/1e9).toFixed(1)+' GB' : b >= 1e6 ? (b/1e6).toFixed(1)+' MB' : Math.round((b||0)/1e3)+' KB';
 const ago = t => { if(!t) return 'never'; const m = Math.round((Date.now()-t)/60000); return m < 2 ? 'just now' : m < 60 ? m+' min ago' : m < 1440 ? Math.round(m/60)+' h ago' : Math.round(m/1440)+' d ago'; };
 async function openAdmin(){
@@ -3875,8 +3880,14 @@ async function openAdmin(){
   let o; try{ o = await api('/api/admin/overview'); }catch(e){ openSheet(head('Run Split it') + `<p class="note bad">${esc(e.message)}</p>`); return; }
   const hh = o.health;
   const warn = [];
-  if(hh.disk && hh.disk.free < 2e9) warn.push(`Only ${fmtBytes(hh.disk.free)} free on the laptop’s disk.`);
-  if(!hh.lastBackupAt && !o.backups.length) warn.push('No backup yet. One is made every hour the server runs.');
+  // the server's own alerts first: a full disk, a damaged file put back from a copy, a backup that failed
+  const alerts = o.alerts || [];
+  if(hh.disk && hh.disk.free < 2e9 && !alerts.some(a => a.kind==='disk')) warn.push(`Only ${fmtBytes(hh.disk.free)} free on the laptop’s disk.`);
+  if(!hh.lastBackupAt && !o.backups.length) warn.push('No backup yet. One is made when the server starts and every 6 hours.');
+  const myZone = (()=>{ try{ return Intl.DateTimeFormat().resolvedOptions().timeZone; }catch(e){ return ''; } })();
+  if(/^(UTC|Etc\/UTC|Etc\/GMT|GMT|Etc\/Universal|Universal|Zulu)$/.test(hh.timeZone||'')) warn.push(`The server’s clock is on UTC, so reminders and “today” are hours off from yours. Set TZ${myZone?'='+myZone:' (for example TZ=America/Toronto)'} in split-it.env or compose.yaml, then restart.`);
+  else if(hh.timeZone && myZone && hh.timeZone !== myZone) warn.push(`The server runs on ${hh.timeZone} time and this phone on ${myZone}. If the house is on ${myZone} time, set TZ=${myZone} on the server.`);
+  if(hh.copyDir && !hh.copyLocked) warn.push('The backups off the laptop aren’t locked. Set BACKUP_PASSPHRASE in split-it.env so nobody who gets the drive or the synced folder can read them.');
   if(!hh.email) warn.push('Email isn’t set up (RESEND_API_KEY), so password resets go through you: use “Reset link” below.');
   if(!hh.publicUrl) warn.push('PUBLIC_URL isn’t set, so links in emails and calendars use whatever address the phone used.');
   if(!hh.copyDir) warn.push('Backups only live on this laptop. Set BACKUP_COPY_DIR in split-it.env to a USB drive or a synced folder for a copy that survives the disk.');
@@ -3885,34 +3896,54 @@ async function openAdmin(){
   const stat = (v, k) => `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`;
   openSheet(head('Run Split it') + `
     <div id="admUpdate"></div>
+    ${alerts.map(a => `<div class="banner" role="alert">${esc(a.text)}${a.dismiss?' <button class="link" data-dismiss style="padding:0">Got it</button>':''}</div>`).join('')}
     ${warn.length?`<div class="banner">${warn.map(esc).join('<br>')}</div>`:''}
-    <label class="f">Health</label><div class="health">${stat('v'+esc(hh.version), 'Split it on Node '+esc(hh.node))}${stat(ago(Date.now()-hh.uptime).replace(' ago','').replace('just now','a moment'), 'running for')}${stat(fmtBytes(hh.dbBytes), hh.docs+' records')}${stat(hh.photos, 'receipt photos, '+fmtBytes(hh.photoBytes))}${hh.disk?stat(fmtBytes(hh.disk.free), 'free on disk'):''}${stat(ago(hh.lastBackupAt), 'last backup')}${hh.copyDir?stat(hh.copyAt?ago(hh.copyAt):'not yet', 'copy off the laptop'):''}${stat(ago(hh.lastBillRun), 'bills checked')}${stat(hh.listeners, 'phones open now')}</div>
-    <p class="note">${hh.email?'Email is on.':'Email is off.'} ${hh.google?'Google sign-in is on.':'Google sign-in is off.'} Reminders go out after ${hh.remindHour}:00. Data lives in <span style="word-break:break-all">${esc(hh.dataDir)}</span>.</p>
+    <label class="f">Health</label><div class="health">${stat('v'+esc(hh.version), 'Split it on Node '+esc(hh.node))}${stat(ago(Date.now()-hh.uptime).replace(' ago','').replace('just now','a moment'), 'running for')}${stat(fmtBytes(hh.dbBytes), hh.docs+' records')}${stat(hh.photos, 'receipt photos, '+fmtBytes(hh.photoBytes))}${hh.disk?stat(fmtBytes(hh.disk.free), 'free on disk'+(hh.disk.used!=null?` (${Math.round(hh.disk.used*100)}% used)`:'')):''}${stat(ago(hh.lastBackupAt), 'last backup')}${stat(esc(hh.timeZone||'?'), 'server time zone')}${hh.copyDir?stat(hh.copyAt?ago(hh.copyAt):'not yet', 'copy off the laptop'):''}${stat(ago(hh.lastBillRun), 'bills checked')}${stat(hh.listeners, 'phones open now')}</div>
+    <p class="note">${hh.email?'Email is on.':'Email is off.'} ${hh.google?'Google sign-in is on.':'Google sign-in is off.'} Reminders go out after ${hh.remindHour}:00 server time (${esc(hh.timeZone||'')}, now ${esc((hh.serverTime||'').slice(11).replace(/^(\d\d)(\d\d)$/,'$1:$2'))}). Data lives in <span style="word-break:break-all">${esc(hh.dataDir)}</span>.</p>
     <label class="f">People (${o.people.length})${o.invites?` · ${o.invites} open invite${o.invites===1?'':'s'}`:''}</label>
     <div class="card">${o.people.map(p => `<button class="row" data-adm="${esc(p.id)}">${av(p.id)}<div class="body"><div class="t ell">${esc(p.nickname||p.name)}${p.owner?' <small class="mut">owner</small>':''}</div><div class="m">${p.lastSeen?'Seen '+ago(p.lastSeen):'Never opened it'}${p.push?' · phone alerts on':''}${p.mcp?' · '+p.mcp+' assistant'+(p.mcp===1?'':'s'):''}${p.code?' · sign-in code on':''}${!p.hasPassword&&!p.google&&!p.email?' · no way to sign in yet':''}</div></div><span class="chev">›</span></button>`).join('')}</div>
     <label class="f">Backups</label>
-    <div style="display:flex;gap:8px;flex-wrap:wrap"><a class="btn primary" href="/api/admin/backup" download>Download everything (zip)</a><button class="btn" id="admRestore">Restore a backup…</button>${hh.copyDir?'<button class="btn" id="admCopy">Copy off the laptop now</button>':''}<button class="btn" id="admPush">Test notifications</button></div>
-    <input type="file" id="admFile" accept=".zip,.json,application/zip,application/json" hidden>
-    <p class="note">The zip has every record, sign-in, and receipt photo, including everyone’s private one-on-ones and groups you’re not in. Treat it like a key to the house. ${hh.copyDir?`A full zip also goes to <span style="word-break:break-all">${esc(hh.copyDir)}</span> every day, 14 kept.`:'Keep one somewhere that isn’t the laptop.'} Daily copies of the records live on the laptop too:</p>
-    ${o.backups.length?`<div class="card">${o.backups.slice(0,12).map(b => `<a class="row" href="/api/admin/backup/${esc(b.file)}" download style="text-decoration:none;color:inherit"><span class="ic">${icon('box')}</span><div class="body"><div class="t">${esc(b.file.replace(/^db-(weekly-)?/,'').replace('.json',''))}${/weekly/.test(b.file)?' <small class="mut">weekly</small>':''}</div><div class="m">${fmtBytes(b.bytes)}</div></div><span class="chev">↓</span></a>`).join('')}</div>`:''}`, sh => {
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${hh.copyLocked?'<a class="btn primary" href="/api/admin/backup?lock=1" download>Download everything (locked)</a><a class="btn" href="/api/admin/backup" download>Download without a lock</a>':'<a class="btn primary" href="/api/admin/backup" download>Download everything (zip)</a><button class="btn" id="admLock">Download locked…</button>'}<button class="btn" id="admRestore">Restore a backup…</button>${hh.copyDir?'<button class="btn" id="admCopy">Copy off the laptop now</button>':''}<button class="btn" id="admPush">Test notifications</button></div>
+    <div id="admLockBox"></div>
+    <input type="file" id="admFile" accept=".zip,.locked,.json,application/zip,application/json,application/octet-stream" hidden>
+    <p class="note">The download has every record, everyone’s password check, and every receipt photo, but no sign-ins, so nobody can use it to get in. ${hh.copyDir?`The records also go to <span style="word-break:break-all">${esc(hh.copyDir)}</span> every 6 hours${hh.copyLocked?', locked with your passphrase':''} (14 days kept), and each receipt photo is copied there once.`:'Keep one somewhere that isn’t the laptop.'} A big backup restores best from the laptop: <code>node server.js restore FILE</code>. Copies of the records on the laptop, taken every 6 hours and at each start:</p>
+    ${o.backups.length?`<div class="card">${o.backups.slice(0,12).map(b => `<a class="row" href="/api/admin/backup/${esc(b.file)}" download style="text-decoration:none;color:inherit"><span class="ic">${icon('box')}</span><div class="body"><div class="t">${esc(b.file.replace(/^db-(weekly-)?/,'').replace('.json','').replace(/-(\d\d)(\d\d)$/,' $1:$2'))}${/weekly/.test(b.file)?' <small class="mut">weekly</small>':''}</div><div class="m">${fmtBytes(b.bytes)}</div></div><span class="chev">↓</span></a>`).join('')}</div>`:''}`, sh => {
     sh.querySelectorAll('[data-adm]').forEach(b => b.onclick = () => openAdminPerson(o.people.find(p => p.id===b.dataset.adm)));
     sh.querySelector('#admPush').onclick = async () => { try{ const r = await api('/api/admin/test-push', {}); toast(`Sent to ${r.sent} phone${r.sent===1?'':'s'}`); }catch(e){ toast(e.message); } };
+    sh.querySelectorAll('[data-dismiss]').forEach(b => b.onclick = async () => { try{ await api('/api/admin/alerts/dismiss', {}); b.closest('.banner').remove(); ownerAlerts = []; render(); }catch(e){ toast(e.message); } });
+    const lk = sh.querySelector('#admLock'); if(lk) lk.onclick = () => { const box = sh.querySelector('#admLockBox');
+      box.innerHTML = `<label class="f" for="admPass">Lock it with a passphrase</label><div class="cbox"><input class="in" id="admPass" type="password" autocomplete="new-password" placeholder="At least 8 characters"><button class="btn primary" id="admLockGo">Download</button></div><p class="note">A locked backup can only be opened with this passphrase, so don’t lose it: there’s no way to get it back.</p>`;
+      const go = box.querySelector('#admLockGo');
+      go.onclick = async () => { const passphrase = box.querySelector('#admPass').value; if(passphrase.length < 8) return toast('Use at least 8 characters for the passphrase.');
+        go.disabled = true; go.textContent = 'Making it…';
+        try{ const r = await fetch('/api/admin/backup', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({passphrase})}); if(!r.ok) throw new Error((await r.json().catch(()=>({}))).error||'Couldn’t make the backup.');
+          const url = URL.createObjectURL(await r.blob()), a = document.createElement('a'); a.href = url; a.download = `split-it-backup-${today()}.locked`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 60e3);
+          box.innerHTML = ''; toast('Backup downloaded, locked with your passphrase'); }
+        catch(e){ toast(e.message); go.disabled = false; go.textContent = 'Download'; } }; };
     const cp = sh.querySelector('#admCopy'); if(cp) cp.onclick = async () => { cp.disabled = true; try{ await api('/api/admin/copy-now', {}); toast('Copied off the laptop'); }catch(e){ toast(e.message); } cp.disabled = false; };
     // a newer Split it on GitHub? (asked only here, at most twice a day)
     api('/api/admin/update').then(u => { const el = sh.querySelector('#admUpdate'); if(!el || !u.newer) return;
       el.innerHTML = `<div class="banner">Split it v${esc(u.latest)} is out. This laptop runs v${esc(u.current)}. ${u.url?`<a href="${esc(u.url)}" target="_blank" rel="noopener">See what’s new</a>. `:''}To update: <code>git pull</code>, then <code>bash install.sh</code>.</div>`; }).catch(()=>{});
     const file = sh.querySelector('#admFile');
     sh.querySelector('#admRestore').onclick = () => file.click();
-    file.onchange = async () => { const f = file.files?.[0]; if(!f) return;
-      openSheet(head('Restore this backup?') + `<p class="note" style="margin:0;font-size:1rem"><b>${esc(f.name)}</b> (${fmtBytes(f.size)})</p><p class="note">Everything in Split it is replaced by what’s in this file. A copy of what’s there now is kept in the backups folder first, so this can be undone. Everyone’s page reloads.</p>
-        <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn danger" id="admGo">Replace everything</button></div>`, sh2 => {
-        const go2 = sh2.querySelector('#admGo');
-        go2.onclick = async () => { if(go2.dataset.armed!=='1'){ go2.dataset.armed='1'; go2.textContent = 'Tap again to replace everything'; return; }
-          go2.disabled = true; go2.textContent = 'Restoring…';
-          try{ const r = await fetch('/api/admin/restore?name='+encodeURIComponent(f.name), {method:'POST', body:f}); const d = await r.json(); if(!r.ok) throw new Error(d.error||'Couldn’t restore that.');
-            closeSheet(); toast(`Restored ${d.docs} records${d.photos?` and ${d.photos} photos`:''}. Reloading…`); setTimeout(() => location.reload(), 1200); }
-          catch(e){ toast(e.message); go2.disabled = false; go2.textContent = 'Replace everything'; go2.dataset.armed = ''; } };
-      }); };
+    file.onchange = () => { const f = file.files?.[0]; if(f) restoreSheet(f, /\.locked$/i.test(f.name)); };
+  });
+}
+function restoreSheet(f, askPass){
+  openSheet(head('Restore this backup?') + `<p class="note" style="margin:0;font-size:1rem"><b>${esc(f.name)}</b> (${fmtBytes(f.size)})</p><p class="note">Everything in Split it is replaced by what’s in this file. It’s checked first, and a copy of what’s there now is kept in the backups folder, so this can be undone. Everyone’s page reloads.</p>
+    ${askPass?'<label class="f" for="admRp">Its passphrase</label><input class="in" id="admRp" type="password" autocomplete="off">':''}
+    ${f.size > 95e6?'<p class="note bad">This file is big. If it doesn’t go through, put it on the laptop and run <code>node server.js restore FILE</code> there.</p>':''}
+    <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn danger" id="admGo">Replace everything</button></div>`, sh2 => {
+    const go2 = sh2.querySelector('#admGo');
+    go2.onclick = async () => { if(go2.dataset.armed!=='1'){ go2.dataset.armed='1'; go2.textContent = 'Tap again to replace everything'; return; }
+      const pass = sh2.querySelector('#admRp')?.value || '';
+      if(askPass && !pass) { toast('Enter the passphrase this backup was locked with.'); go2.dataset.armed = ''; go2.textContent = 'Replace everything'; return; }
+      go2.disabled = true; go2.textContent = 'Restoring…';
+      try{ const r = await fetch('/api/admin/restore?name='+encodeURIComponent(f.name), {method:'POST', headers: pass ? {'X-Backup-Passphrase': encodeURIComponent(pass)} : {}, body:f}); const d = await r.json().catch(()=>({}));
+        if(r.status === 401 && d.locked && !askPass) return restoreSheet(f, true);
+        if(!r.ok) throw new Error(d.error||'Couldn’t restore that.');
+        closeSheet(); toast(`Restored ${d.docs} records${d.photos?` and ${d.photos} photos`:''}. Reloading…`); setTimeout(() => location.reload(), 1200); }
+      catch(e){ toast(e.message); go2.disabled = false; go2.textContent = 'Replace everything'; go2.dataset.armed = ''; } };
   });
 }
 function openAdminPerson(p){
@@ -4099,7 +4130,8 @@ async function boot(timer){
   user = u; sample = smp; downloads = dl;
   if(sample){ try{ canImages = !!(await sample.limits())?.images; }catch(e){ canImages = false; } }
   if(user){ myUid = await user.id(); isOwner = await user.isOwner(); const w = await user.can('data.write'); if(w===false) canWrite = false;
-    if(myUid) user.profiles([myUid]).then(ps => { S.prof = bare({...S.prof, ...ps}); schedule(); }); }
+    if(myUid) user.profiles([myUid]).then(ps => { S.prof = bare({...S.prof, ...ps}); schedule(); });
+    if(isOwner && LAPTOP){ loadOwnerAlerts(); setInterval(loadOwnerAlerts, 10*60e3); } }
   else canWrite = false;
   const done = () => { if(ready()) clearTimeout(timer); tick(); };
   db.doc('house/config').get().then(s => { const d = s.exists ? s.data() : null; S.legacy = d && !d.migratedTo ? d : null; done(); }).catch(()=>{});

@@ -347,7 +347,7 @@ test('a backup zip brings everything back, and a restore can itself be undone', 
 });
 
 test('a full copy of the backup goes to the second place every day', async () => {
-  const today = `split-it-backup-${new Date().toISOString().slice(0, 10)}.zip`;
+  const today = `split-it-backup-${require('../server.js').localDay()}.zip`;
   assert.ok(fs.existsSync(path.join(COPIES, today)), 'written when the app started');
   const h = (await ana.get('/api/admin/overview')).data.health;
   assert.strictEqual(h.copyDir, COPIES); assert.ok(h.copyAt > 0); assert.strictEqual(h.copyError, null);
