@@ -476,7 +476,10 @@ button.tile:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--pop)}
 .tile b.long{font-size:clamp(.72rem,3vw,1rem)}
 /* offline pill */
 .netpill{position:fixed;left:50%;transform:translateX(-50%);top:calc(8px + env(safe-area-inset-top,0px));z-index:40;background:#14112A;color:#fff;border:2px solid #FFD23F;border-radius:999px;padding:5px 12px;font-size:.8rem;font-weight:700;display:flex;gap:8px;align-items:center;box-shadow:3px 3px 0 rgba(0,0,0,.25)}
-.netpill i{width:8px;height:8px;border-radius:50%;background:#FF8A9A}.netpill.sync i{background:#FFD23F;animation:blink 1s infinite}
+.netpill i{width:8px;height:8px;border-radius:50%;background:#FF8A9A;flex:none}.netpill.sync i{background:#FFD23F;animation:blink 1s infinite}
+.netpill{max-width:calc(100vw - 32px)}.netpill>span{display:flex;flex-direction:column;line-height:1.2}.netpill b{white-space:nowrap}.netpill small{font-weight:600;opacity:.8;font-size:.72rem}
+.netpill .nsbtn{font:inherit;font-weight:800;color:#14112A;background:#FF8A9A;border:0;border-radius:999px;padding:3px 10px;cursor:pointer}
+.netpill.warn{padding:4px}
 /* month headers in lists carry the month's total */
 .month .tot{font-weight:700;color:var(--ink)}.month .tot small{color:var(--muted);font-weight:600;margin-left:6px}
 /* unread comments */
@@ -1145,6 +1148,21 @@ async function write(fn, quiet){
     return false;
   }
 }
+// Several changes that belong together (a move-out, "confirm all", a new group) go to the laptop as one batch,
+// saved all together or not at all, and wait offline as one item. Past 100 changes it goes in parts of 100, in order,
+// with the last part holding the final steps, so running it again finishes the job.
+// The Claude artifact has no batch, so there they are sent one after another as before.
+async function writeAll(build, label){
+  const ops = [];
+  const b = { set:(ref, data)=>(ops.push(['set', ref, data]), b), update:(ref, data)=>(ops.push(['update', ref, data]), b), delete:ref=>(ops.push(['delete', ref]), b) };
+  await build(b);
+  if(!(LAPTOP && db.batch)){ for(const [op, ref, data] of ops) await (op==='delete' ? ref.delete() : ref[op](data)); return; }
+  for(let i = 0; i < ops.length; i += 100){
+    const wb = db.batch();
+    for(const [op, ref, data] of ops.slice(i, i+100)) op==='delete' ? wb.delete(ref) : wb[op](ref, data);
+    await wb.commit(label);
+  }
+}
 function openSheet(html, mount){
   if(S.sheetUnsub){ S.sheetUnsub(); S.sheetUnsub=null; } document.querySelectorAll('.toast').forEach(t=>t.classList.add('top'));
   if(!layer.firstElementChild || layer.firstElementChild.classList.contains('out')) navPush('push', {tab:S.tab, page:S.page, sheet:true});
@@ -1345,9 +1363,10 @@ function bind(){
   on('[data-bill]','onclick',el=>openBill(el.dataset.bill));
   on('[data-fill]','onclick',el=>fillAmount(el.dataset.fill));
   on('[data-confirm]','onclick',el=>confirmReceived(el.dataset.confirm, el.dataset.ok==='1'));
+  on('#notSavedBtn','onclick',()=>openNotSaved());
   on('#newsOk','onclick',()=>{ try{ localStorage.setItem('hs.news', NEWS.v); }catch(e){} render(); });
   on('#confirmAll','onclick',async el=>{ if(!confirmTap(el, 'Tap again to confirm all')) return; const ids = el.dataset.ids.split(',').filter(id => alive(S.expensesRaw).some(x=>x._id===id && x.to===myUid && x.confirmed===false));
-    if(await write(async()=>{ for(const id of ids) await db.doc('expenses/'+id).update({confirmed:true}); })) celebrate('Money received!'); });
+    if(await write(()=>writeAll(b => { for(const id of ids) b.update(db.doc('expenses/'+id), {confirmed:true}); }, `Confirming ${ids.length} payments`))) celebrate('Money received!'); });
   on('[data-pay]','onclick',el=>{ const p = JSON.parse(el.dataset.pay); confirmPay(p, {type:'group', id:p.gid}); });
   on('[data-nudge]','onclick',el=>nudge(JSON.parse(el.dataset.nudge)));
   on('[data-et]','onclick',el=>copy(el.dataset.et, 'e‑Transfer address copied'));
@@ -1459,7 +1478,7 @@ function renderProfileSetup(){
 }
 function openProfile(){
   const p = S.people[myUid]; let color = p.color||0, char = ART[p.char] ? p.char : (p.char===null||p.char==='' ? '' : myChar());
-  openSheet(head('Your profile') + `<div class="pair">${av(myUid,'lg')}<div><div style="font-weight:600">${esc(nameOf(myUid))}</div><div class="note" style="margin:2px 0 0">${LAPTOP?`Signed in as ${esc(S.prof[myUid]?.name||'you')} · <a href="/api/logout" class="link" style="padding:0">Sign out</a>`:'Signed in with your Claude account'}</div></div></div>
+  openSheet(head('Your profile') + `<div class="pair">${av(myUid,'lg')}<div><div style="font-weight:600">${esc(nameOf(myUid))}</div><div class="note" style="margin:2px 0 0">${LAPTOP?`Signed in as ${esc(S.prof[myUid]?.name||'you')} · <a href="/api/logout" class="link" id="signOut" style="padding:0">Sign out</a>`:'Signed in with your Claude account'}</div></div></div>
     <label class="f" for="nk">What people call you</label><input class="in" id="nk" maxlength="24" value="${esc(p.nickname||'')}" placeholder="${esc(S.prof[myUid]?.name||'Your account name')}">
     <label class="f">Your guide</label>${charPicker(char)}
     <label class="f">Colour</label><div class="colors">${COLORS.map((c,i)=>`<button data-col="${i}" style="background:${c}" aria-label="Colour ${i+1}" aria-pressed="${i===color}"></button>`).join('')}</div>
@@ -1478,6 +1497,7 @@ function openProfile(){
     <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn primary" id="sv">Save</button></div>`, sh => {
     const ab = sh.querySelector('#adminBtn'); if(ab) ab.onclick = () => openAdmin();
     const fb = sh.querySelector('#forgetBtn'); if(fb) fb.onclick = () => drawForget(sh.querySelector('#forgetBox'), fb);
+    const so = sh.querySelector('#signOut'); if(so) so.onclick = ev => { ev.preventDefault(); signOutHere(so); };
     sh.querySelectorAll('[data-col]').forEach(b => b.onclick = () => { color = Number(b.dataset.col); sh.querySelectorAll('[data-col]').forEach(x=>x.setAttribute('aria-pressed', x===b)); });
     drawPushBox(sh.querySelector('#pushBox')); drawAccount(sh.querySelector('#acctBox')); drawAssistants(sh.querySelector('#aiBox'));
     sh.querySelectorAll('[data-theme-pick]').forEach(b => b.onclick = () => { const t = b.dataset.themePick; try{ localStorage.setItem(THEME_KEY, t); }catch(e){}
@@ -1575,7 +1595,7 @@ async function drawAccount(box){
     const kc = form.querySelector('#acKeyCopy'); if(kc) kc.onclick = async () => { try{ await navigator.clipboard.writeText(st.secret); toast('Key copied'); }catch(e){ toast('Couldn’t copy. Type it in'); } };
   };
   box.querySelector('#acOut').onclick = async e => { if(!confirmTap(e.currentTarget, 'Tap again to sign out everywhere')) return;
-    try{ await api('/api/account/signout-all', {}); location.href = '/login'; }catch(x){ toast(x.message); } };
+    try{ await api('/api/account/signout-all', {}); await window.HouseSplitOffline?.forget(); location.href = '/login'; }catch(x){ toast(x.message); } };
 }
 /* ================= your AI assistants: connect Claude, Muse or ChatGPT to your own account ================= */
 const copyIt = async (text, ok) => { try{ await navigator.clipboard.writeText(text); toast(ok); }catch(e){ toast('Couldn’t copy. Select it and copy it'); } };
@@ -2068,6 +2088,7 @@ function viewHome(){
     ${showArt?lulu(moodFor(t.net),'hart'):''}</section>`;
   h += newsCard();
   h += inboxCards();
+  h += notSavedCard();
   if(canWrite){
     h += `<div class="quick"><label for="quickIn" class="sr">Quick add</label>
       <input id="quickIn" placeholder="lunch with Aman 24.50" autocomplete="off" enterkeyhint="go">
@@ -2492,26 +2513,27 @@ function openGroupEditor(gid){
       const name = sh.querySelector('#gn').value.trim().slice(0,40); if(!name){ toast('Give the group a name'); return; }
       if(isNew && !st.add.size && !st.guests.length){ toast('Add at least one other person'); return; }
       sh.querySelector('#sv').disabled = true;
-      const id = gid || newId('g'), now = Date.now();
+      const id = gid || (st.newGid = st.newGid || newId('g')), now = Date.now();   // the same new id if Save is tapped again
       const usedColors = new Set(groupMembers(id).map(m=>colorOf(m.id)));
-      const ok = await write(async () => {
-        if(isNew) await db.doc('groups/'+id).set({name, emoji:st.emoji, createdBy:myUid, createdAt:now, lastAt:now, simplify:true, archived:false});
-        else {
+      // a new group is saved first on its own (the laptop only lets you add people to a group that exists), then everyone in it together
+      const ok = (!isNew || st.made || (st.made = await write(() => db.doc('groups/'+id).set({name, emoji:st.emoji, createdBy:myUid, createdAt:now, lastAt:now, simplify:true, archived:false}))))
+        && await write(() => writeAll(b => {
+        if(!isNew){
           const byShares = sh.querySelector('[data-ds="shares"]').getAttribute('aria-pressed')==='true', shares = {};
           sh.querySelectorAll('[data-dsw]').forEach(i => { const v = Math.max(0, Math.round(+i.value||0)); if(v) shares[i.dataset.dsw] = v; });
           const budgets = {}; sh.querySelectorAll('[data-bud]').forEach(i => { const v = Math.round((parseFloat(i.value)||0)*100); if(v>0) budgets[i.dataset.bud] = v; });
-          await db.doc('groups/'+id).update({name, emoji:st.emoji, simplify: sh.querySelector('[data-simp="1"]').getAttribute('aria-pressed')==='true', archived: sh.querySelector('#arch').checked, cur: sh.querySelector('#gcur').value==='CAD' ? null : sh.querySelector('#gcur').value,
+          b.update(db.doc('groups/'+id), {name, emoji:st.emoji, simplify: sh.querySelector('[data-simp="1"]').getAttribute('aria-pressed')==='true', archived: sh.querySelector('#arch').checked, cur: sh.querySelector('#gcur').value==='CAD' ? null : sh.querySelector('#gcur').value,
             defaultSplit: byShares && Object.keys(shares).length ? {mode:'shares', input:{shares}} : null, budgets: Object.keys(budgets).length ? budgets : null});
         }
-        if(isNew) await db.doc(`groups/${id}/members/${myUid}`).set({kind:'account', active:true, joinedAt:now, addedBy:myUid});
+        if(isNew) b.set(db.doc(`groups/${id}/members/${myUid}`), {kind:'account', active:true, joinedAt:now, addedBy:myUid});
         for(const fid of st.add){
-          if(S.people[fid]) await db.doc(`groups/${id}/members/${fid}`).set({kind:'account', active:true, joinedAt:now, addedBy:myUid});
-          else { const r = personRec(fid); await db.doc(`groups/${id}/members/${fid}`).set({kind:'guest', name:nameOf(fid), color:r?.color||0, active:true, joinedAt:now, addedBy:myUid}); }
+          if(S.people[fid]) b.set(db.doc(`groups/${id}/members/${fid}`), {kind:'account', active:true, joinedAt:now, addedBy:myUid});
+          else { const r = personRec(fid); b.set(db.doc(`groups/${id}/members/${fid}`), {kind:'guest', name:nameOf(fid), color:r?.color||0, active:true, joinedAt:now, addedBy:myUid}); }
         }
         let ci = 0;
         for(const n of st.guests){ while(usedColors.has(COLORS[ci%COLORS.length]) && ci<COLORS.length) ci++;
-          await db.doc(`groups/${id}/members/${newId('g_')}`).set({kind:'guest', name:n, color:ci%COLORS.length, active:true, joinedAt:now, addedBy:myUid}); ci++; }
-      });
+          b.set(db.doc(`groups/${id}/members/${newId('g_')}`), {kind:'guest', name:n, color:ci%COLORS.length, active:true, joinedAt:now, addedBy:myUid}); ci++; }
+      }, isNew ? `Making the group ${name}` : `Changes to ${name}`));
       if(ok){ closeSheet(); if(isNew){ go('groups',{type:'group',id}); toast('Group created'); } else toast('Saved'); }
       else sh.querySelector('#sv').disabled = false;
     };
@@ -2555,11 +2577,11 @@ function openMember(gid, id){
     sh.querySelectorAll('[data-linkto]').forEach(x => x.onclick = () => linkGuest(gid, id, x.dataset.linkto));
     const out = sh.querySelector('#out');
     if(out) out.onclick = async () => {
-      if(await write(()=>db.doc(`groups/${gid}/members/${id}`).update({active:false, leftAt:Date.now()}))){ closeSheet(); toast(isMe?'You left the group':firstName(id)+' moved out'); stripFromBills(gid, id); if(isMe) go('groups'); } };
+      if(await write(()=>writeAll(b => { b.update(db.doc(`groups/${gid}/members/${id}`), {active:false, leftAt:Date.now()}); stripFromBills(gid, id, b); }, isMe ? 'Leaving the group' : `Moving ${firstName(id)} out`))){ closeSheet(); toast(isMe?'You left the group':firstName(id)+' moved out'); if(isMe) go('groups'); } };
     sh.querySelectorAll('[data-mpay]').forEach(x => x.onclick = () => { const p = JSON.parse(x.dataset.mpay); confirmPay(p, {type:'group', id:gid}); });
-    sh.querySelectorAll('[data-heir]').forEach(x => x.onclick = async () => { const to = x.dataset.heir; let ok = true;
-      for(const r of paysBills) ok = ok && await write(()=>db.doc('recurring/'+r._id).update({paidBy:to}), true);
-      closeSheet(); toast(ok ? `${youOr(to)} ${to===myUid?'pay':'pays'} ${paysBills.length>1?'those bills':paysBills[0].title} now` : 'Some bills didn’t change. Try again');
+    sh.querySelectorAll('[data-heir]').forEach(x => x.onclick = async () => { const to = x.dataset.heir;
+      const ok = await write(()=>writeAll(b => { for(const r of paysBills) b.update(db.doc('recurring/'+r._id), {paidBy:to}); }, `Handing over ${paysBills.length>1?'bills':paysBills[0].title}`), true);
+      closeSheet(); toast(ok ? `${youOr(to)} ${to===myUid?'pay':'pays'} ${paysBills.length>1?'those bills':paysBills[0].title} now` : 'The bills didn’t change. Try again');
       if(ok) setTimeout(() => openMember(gid, id), 400); });
     const bk = sh.querySelector('#back');
     if(bk) bk.onclick = async () => { if(await write(()=>db.doc(`groups/${gid}/members/${id}`).update({active:true}))){ closeSheet(); toast('Back in'); } };
@@ -2587,27 +2609,30 @@ function linkGuest(gid, from, to){
   });
 }
 async function mergeInGroup(gid, from, to){
-  if(!groupMembers(gid).some(m=>m.id===to)) if(!await write(()=>db.doc(`groups/${gid}/members/${to}`).set({kind:'account', active:true, joinedAt:Date.now(), addedBy:myUid}), true)) return false;
   const sw = x => x===from ? to : x;
-  for(const e of groupEntries(gid)){
-    if(!e.people.includes(from) && ![e.addedBy,e.editedBy,e.deletedBy].includes(from)) continue;
-    const upd = { people: [...new Set(e.people.map(sw))] };
-    for(const k of ['paidBy','from','to','addedBy','editedBy','deletedBy']) if(e[k]===from) upd[k]=to;
-    if(e.split) upd.split = swapIds(e.split, from, to);
-    if(e.splitInput) upd.splitInput = swapInput(e.splitInput, from, to);
-    if(!await write(()=>db.doc('expenses/'+e._id).update(upd), true)) return false;
-  }
-  for(const r of groupBills(gid)) if(r.paidBy===from || JSON.stringify(r.splitInput||{}).includes('"'+from+'"'))
-    if(!await write(()=>db.doc('recurring/'+r._id).update({paidBy:sw(r.paidBy), splitMode:r.splitMode, splitInput:swapInput(r.splitInput, from, to)}), true)) return false;
-  return await write(()=>db.doc(`groups/${gid}/members/${from}`).delete(), true);
+  return write(() => writeAll(b => {
+    if(!groupMembers(gid).some(m=>m.id===to)) b.set(db.doc(`groups/${gid}/members/${to}`), {kind:'account', active:true, joinedAt:Date.now(), addedBy:myUid});
+    for(const e of groupEntries(gid)){
+      if(!e.people.includes(from) && ![e.addedBy,e.editedBy,e.deletedBy].includes(from)) continue;
+      const upd = { people: [...new Set(e.people.map(sw))] };
+      for(const k of ['paidBy','from','to','addedBy','editedBy','deletedBy']) if(e[k]===from) upd[k]=to;
+      if(e.split) upd.split = swapIds(e.split, from, to);
+      if(e.splitInput) upd.splitInput = swapInput(e.splitInput, from, to);
+      b.update(db.doc('expenses/'+e._id), upd);
+    }
+    for(const r of groupBills(gid)) if(r.paidBy===from || JSON.stringify(r.splitInput||{}).includes('"'+from+'"'))
+      b.update(db.doc('recurring/'+r._id), {paidBy:sw(r.paidBy), splitMode:r.splitMode, splitInput:swapInput(r.splitInput, from, to)});
+    b.delete(db.doc(`groups/${gid}/members/${from}`));
+  }, `Linking ${nameOf(from)} to ${nameOf(to)}`), true);
 }
-async function stripFromBills(gid, id){
+// someone moved out: take them out of the bills' splits (added to the same batch as the move-out)
+function stripFromBills(gid, id, b){
   for(const r of groupBills(gid)){
     const inp = JSON.parse(JSON.stringify(r.splitInput||{})); let changed = false;
     if(inp.ids?.includes(id)){ inp.ids = inp.ids.filter(x=>x!==id); changed = true; }
     if(inp.shares?.[id]){ delete inp.shares[id]; changed = true; }
     if(inp.exact?.[id]){ toast(`Check ${r.title}: it had a set amount for ${nameOf(id)}`); continue; }
-    if(changed) await write(()=>db.doc('recurring/'+r._id).update({splitInput:inp, splitMode:r.splitMode}), true);
+    if(changed) b.update(db.doc('recurring/'+r._id), {splitInput:inp, splitMode:r.splitMode});
   }
 }
 
@@ -2653,7 +2678,7 @@ function openContact(fid){
       if(await write(()=>privDoc().collection('friends').doc(fid).update({name:v, color}))){ closeSheet(); toast('Saved'); } };
     const d = sh.querySelector('#del');
     d.onclick = async () => { if(d.dataset.armed!=='1'){ d.dataset.armed='1'; d.textContent='Tap again to remove'; return; }
-      const ok = await write(async () => { for(const e of privateEntries(fid)) await privDoc().collection('entries').doc(e._id).delete(); await privDoc().collection('friends').doc(fid).delete(); });
+      const ok = await write(() => writeAll(b => { for(const e of privateEntries(fid)) b.delete(privDoc().collection('entries').doc(e._id)); b.delete(privDoc().collection('friends').doc(fid)); }, `Removing ${nameOf(fid)}`));
       if(ok){ closeSheet(); go('friends'); toast('Removed'); } };
   });
 }
@@ -2995,8 +3020,8 @@ function openExpense(opts={}){
           const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact:sp}, orig: st.cur==='CAD' ? null : {cur:st.cur, amount:oa, rate:rate()},
             photo: n===1 ? body.photo : null, people:[...new Set([by, ...Object.keys(sp)])], pair:{id, n, total:cad, other: n===1 ? id2 : id},
             ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now()+n-1, addedBy:myUid});
-          done = await write(async () => { await ref.set(part(1, st.paidBy, cad-b, s1, a-f2)); await ref2.set(part(2, st.paidBy2, b, s2, f2)); });
-          if(done){ closeSheet(); buzz(10); toast('Added as two entries', {label:'Undo', fn:()=>write(async()=>{ await ref.update({deletedAt:Date.now(), deletedBy:myUid}); await ref2.update({deletedAt:Date.now(), deletedBy:myUid}); })});
+          done = await write(() => writeAll(w => { w.set(ref, part(1, st.paidBy, cad-b, s1, a-f2)); w.set(ref2, part(2, st.paidBy2, b, s2, f2)); }, `Your expense ‘${body.title||'Expense'} ${money(cad)}’`));
+          if(done){ closeSheet(); buzz(10); toast('Added as two entries', {label:'Undo', fn:()=>write(()=>writeAll(w => { w.update(ref, {deletedAt:Date.now(), deletedBy:myUid}); w.update(ref2, {deletedAt:Date.now(), deletedBy:myUid}); }, 'Undoing the two entries'))});
             if(isGroup) write(()=>db.doc('groups/'+ctx.id).update({lastAt:Date.now()}), true); postDueBills(); } else $('#save').disabled = false;
           return;
         }
@@ -3110,7 +3135,7 @@ function openDetail(id, priv){
       }, () => { const cl = sh.querySelector('#cl'); if(cl) cl.innerHTML = '<div class="comment"><span class="mut">Comments didn’t load.</span></div>'; });
       const cs = sh.querySelector('#cs'), ci = sh.querySelector('#ci');
       if(cs){ const send = async () => { const t = ci.value.trim(); if(!t) return; cs.disabled = true;
-          if(await write(async () => { await col.doc(newId('c')).set({by:myUid, text:t.slice(0,300), at:Date.now()}); await db.doc('expenses/'+e._id).update({comments:(e.comments||0)+1}); })){ ci.value=''; e.comments=(e.comments||0)+1; }
+          if(await write(() => writeAll(b => { b.set(col.doc(newId('c')), {by:myUid, text:t.slice(0,300), at:Date.now()}); b.update(db.doc('expenses/'+e._id), {comments:(e.comments||0)+1}); }, `Your comment on ${e.title||'an expense'}`))){ ci.value=''; e.comments=(e.comments||0)+1; }
           cs.disabled = false; };
         cs.onclick = send; ci.onkeydown = ev => { if(ev.key==='Enter'){ ev.preventDefault(); send(); } }; }
     });
@@ -3549,7 +3574,8 @@ function openImport(gid){
         const map = names.map((n,i) => sh.querySelector(`[data-sw="${i}"]`).value);
         if(!map.some(Boolean)){ toast('Match at least one person'); return; }
         const btn = sh.querySelector('#swGo'); btn.disabled = true; let n = 0, skipped = 0, bad = 0;
-        const ok = await write(async () => {
+        const ok = await write(() => writeAll(b => {   // in batches of 100: running it again skips what got in
+          n = 0; skipped = 0; bad = 0;
           for(const r of data){
             const date = r[ci.date].slice(0,10), title = (r[ci.description]||'Imported').slice(0,60), cost = Math.round(parseFloat(r[ci.cost])*100);
             const key = 'sw:' + hash(r.join('|')); if(already.has(key)){ skipped++; continue; }
@@ -3558,13 +3584,13 @@ function openImport(gid){
             const payerI = nets.indexOf(Math.max(...nets)); const payer = map[payerI]; if(!payer){ bad++; continue; }
             const isPay = /^payment$/i.test(r[ci.category]||'');
             if(isPay){ const toI = nets.findIndex((v,i) => v < 0 && i !== payerI), to = map[toI]; if(!to){ bad++; continue; }
-              await db.doc('expenses/'+newId('e')).set({kind:'payment', from:payer, to, amount:cost, date, createdAt:Date.now(), addedBy:myUid, confirmed: to===myUid || isGuest(to), people:[payer,to], groupId:gid, swKey:key}); n++; continue; }
+              b.set(db.doc('expenses/'+newId('e')), {kind:'payment', from:payer, to, amount:cost, date, createdAt:Date.now(), addedBy:myUid, confirmed: to===myUid || isGuest(to), people:[payer,to], groupId:gid, swKey:key}); n++; continue; }
             const split = {}; nets.forEach((v,i) => { const id = map[i]; if(!id) return; const sh2 = i===payerI ? cost - v : -v; if(sh2 > 0) split[id] = (split[id]||0) + sh2; });
             const sum = sumOf(split); if(!sum){ bad++; continue; }
             if(sum !== cost){ const k = Object.keys(split)[0]; split[k] += cost - sum; }   // rounding dust
-            await db.doc('expenses/'+newId('e')).set({kind:'expense', groupId:gid, title, amount:cost, paidBy:payer, split, splitMode:'exact', splitInput:{exact:{...split}}, category:SW_CATS[r[ci.category]]||'other', date, note:'Imported from Splitwise', createdAt:Date.now(), addedBy:myUid, people:[...new Set([payer, ...Object.keys(split)])], swKey:key}); n++;
+            b.set(db.doc('expenses/'+newId('e')), {kind:'expense', groupId:gid, title, amount:cost, paidBy:payer, split, splitMode:'exact', splitInput:{exact:{...split}}, category:SW_CATS[r[ci.category]]||'other', date, note:'Imported from Splitwise', createdAt:Date.now(), addedBy:myUid, people:[...new Set([payer, ...Object.keys(split)])], swKey:key}); n++;
           }
-        });
+        }, 'Importing from Splitwise'));
         if(ok){ closeSheet(); toast(`Imported ${n} row${n===1?'':'s'}${skipped?`, ${skipped} already there`:''}${bad?`, ${bad} couldn’t be read`:''}`); } else btn.disabled = false;
       };
     };
@@ -3595,12 +3621,12 @@ function reviewMany(ctx, parsed){
     sh.querySelector('#manySave').onclick = async () => {
       const picks = [...sh.querySelectorAll('.pick:checked')].map(c => parsed[+c.dataset.i]); if(!picks.length) return;
       sh.querySelector('#manySave').disabled = true; let n = 0;
-      const ok = await write(async () => { for(const p of picks){
+      const ok = await write(() => writeAll(b => { n = 0; for(const p of picks){
         const pre = cleanAi({...p.d, where: isGroup?'g:'+ctx.id:'f:'+ctx.id}).prefill, id = newId('e'), ids = (pre.ids && pre.ids.length ? pre.ids : mem).filter(x => mem.includes(x));
         const split = pre.exact && sumOf(pre.exact)===pre.amount ? pre.exact : splitEqual(pre.amount, ids.length?ids:mem, id);
         const priv = ctxIsPrivate(ctx), ref = priv ? privDoc().collection('entries').doc(id) : db.doc('expenses/'+id);
-        await ref.set({kind:'expense', title: pre.title || p.line.slice(0,60), amount: pre.amount, paidBy: pre.paidBy, split, splitMode: pre.exact?'exact':'equal', splitInput: pre.exact?{exact:split}:{ids:Object.keys(split)}, category: pre.cat, date: pre.date, note:'', orig:null, photo:null,
-          people:[...new Set([pre.paidBy, ...Object.keys(split)])], ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now(), addedBy:myUid}); n++; } });
+        b.set(ref, {kind:'expense', title: pre.title || p.line.slice(0,60), amount: pre.amount, paidBy: pre.paidBy, split, splitMode: pre.exact?'exact':'equal', splitInput: pre.exact?{exact:split}:{ids:Object.keys(split)}, category: pre.cat, date: pre.date, note:'', orig:null, photo:null,
+          people:[...new Set([pre.paidBy, ...Object.keys(split)])], ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now(), addedBy:myUid}); n++; } }, `Your ${picks.length} pasted expenses`));
       if(ok){ closeSheet(); buzz(10); toast(`Added ${n} expense${n===1?'':'s'}`); if(isGroup) write(()=>db.doc('groups/'+ctx.id).update({lastAt:Date.now()}), true); }
       else sh.querySelector('#manySave').disabled = false;
     };
@@ -4063,16 +4089,110 @@ async function migrate(){
 
 /* ================= boot ================= */
 document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if(b) go(b.dataset.tab); });
-// Offline: a small pill says so, and counts the changes waiting to reach the laptop.
+// Offline: a small pill says so, counts the changes waiting to reach the laptop, and says when it last caught up.
+// Changes the laptop couldn't take show up there too, and on Home, until you redo or dismiss them.
+const syncedLabel = t => { if(!t) return ''; const d = new Date(t), tm = d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  return d.toDateString() === new Date().toDateString() ? tm : d.toLocaleDateString([], {month:'short', day:'numeric'}) + ', ' + tm; };
+const notSavedList = () => { try{ return window.HouseSplitOffline?.notSaved?.() || []; }catch(e){ return []; } };
 function netPill(){
-  const off = window.HouseSplitOffline, pend = off ? off.pending() : 0, offline = off ? off.offline() : false;
+  const off = window.HouseSplitOffline, pend = off ? off.pending() : 0, offline = off ? off.offline() : false, ns = notSavedList().length;
   let el = document.getElementById('netpill');
-  if(!offline && !pend){ el?.remove(); return; }
-  if(!el){ el = document.createElement('div'); el.id = 'netpill'; el.className = 'netpill'; el.setAttribute('role','status'); document.body.appendChild(el); }
-  el.className = 'netpill' + (!offline && pend ? ' sync' : '');
-  el.innerHTML = `<i></i>${offline ? 'Offline' : 'Catching up'}${pend ? ` · ${pend} change${pend===1?'':'s'} waiting` : ' · showing what you had'}`;
+  if(!offline && !pend && !ns){ el?.remove(); return; }
+  if(!el){ el = document.createElement('div'); el.id = 'netpill'; el.setAttribute('role','status'); document.body.appendChild(el); }
+  const last = off?.lastSynced?.();
+  el.className = 'netpill' + (!offline && pend ? ' sync' : '') + (!offline && !pend && ns ? ' warn' : '');
+  const main = pend ? `Waiting to sync (${pend})` : offline ? 'Offline' : '';
+  const sub = [pend && offline ? 'Offline' : '', last ? `last synced ${esc(syncedLabel(last))}` : offline ? 'showing what you had' : ''].filter(Boolean).join(' · ');
+  el.innerHTML = (main ? `<i></i><span><b>${main}</b>${sub ? `<small>${sub.charAt(0).toUpperCase() + sub.slice(1)}</small>` : ''}</span>` : '')
+    + (ns ? `<button type="button" class="nsbtn" data-notsaved>${ns} not saved</button>` : '');
+  const nb = el.querySelector('[data-notsaved]'); if(nb) nb.onclick = openNotSaved;
 }
-['hs-offline','hs-online','hs-queue'].forEach(ev => window.addEventListener(ev, netPill));
+['hs-offline','hs-online','hs-queue','hs-aside'].forEach(ev => window.addEventListener(ev, netPill));
+// What a queued change was, in words: "Your expense ‘Pizza $24.00’".
+const entryOp = o => { const s = o.path.split('/'); return (s[0]==='expenses' && s.length===2) || (s[0]==='data' && s[4]==='entries' && s.length===6); };
+const entryNow = id => S.expensesRaw.find(e=>e._id===id) || (S.privEntries||[]).find(e=>e._id===id) || null;
+function describeChange(it){
+  if(it.label) return it.label;
+  const o = (it.ops||[])[0]; if(!o) return 'A change';
+  const s = o.path.split('/'), d = o.data || {}, last = s[s.length-1];
+  if(entryOp(o)){
+    const cur = entryNow(last), e = {...(cur||{}), ...d}, what = `‘${e.title || (e.kind==='payment'?'Payment':'Expense')}${e.amount?' '+money(Math.abs(e.amount)):''}’`;
+    if(o.op==='delete' || (d.deletedAt && !cur?.deletedAt)) return `Deleting ${what}`;
+    if(e.kind==='payment'){
+      if(o.op==='update' && d.confirmed===true) return `Confirming ${money(e.amount)} from ${firstName(e.from)}`;
+      return `Your payment of ${money(e.amount)}${e.to && e.to!==myUid ? ' to '+firstName(e.to) : ''}`;
+    }
+    return `Your ${o.op==='update' ? 'change to ' : ''}${e.amount<0 ? 'money in' : 'expense'} ${what}`;
+  }
+  if(s[0]==='expenses' && s[2]==='comments') return 'Your comment';
+  if(s[0]==='recurring') return `The bill ‘${d.title || S.recurringRaw.find(r=>r._id===s[1])?.title || 'bill'}’`;
+  if(s[0]==='chores') return `The chore ‘${d.title || S.chores.find(c=>c._id===s[1])?.title || 'chore'}’`;
+  if(s[0]==='groups') return s.length===2 ? `The group ‘${d.name || S.groups[s[1]]?.name || 'group'}’` : `A change to who’s in ${S.groups[s[1]]?.name || 'a group'}`;
+  if(s[0]==='people') return 'Your profile';
+  if(s[4]==='friends') return 'A change to your friends';
+  return 'A change';
+}
+function whyNotSaved(it){
+  const m = String(it.message||'').trim();
+  if(it.reason==='stuck') return m || 'It didn’t go through after several tries.';
+  if(it.code==='invalid_argument' && (!m || /^not allowed$|^bad /i.test(m))) return 'You don’t have permission to change that.';
+  if(it.code==='not_found') return 'It was removed in the meantime.';
+  return m || 'The laptop wouldn’t take it.';
+}
+const notSavedText = it => `${describeChange(it)} couldn’t be saved: ${whyNotSaved(it)}`;
+// Redo: an expense opens its form again, filled in with what you entered. Anything else is simply sent again.
+function redoChange(it){
+  window.HouseSplitOffline?.dismiss(it.id); netPill(); if(S.tab==='home' && !S.page) schedule();
+  document.querySelectorAll('.toast').forEach(t=>t.remove());
+  const ops = it.ops || [], o = ops[0];
+  if(ops.length===1 && o && o.op!=='delete' && entryOp(o)){
+    const s = o.path.split('/'), cur = entryNow(s[s.length-1]), e = o.op==='set' ? {...o.data} : {...(cur||{}), ...o.data};
+    if(e.kind==='expense' && e.title!=null && !e.deletedAt && e.status!=='needs_amount'){
+      const sp = e.split || {}, keys = Object.keys(sp), foreign = e.orig && e.orig.cur && e.orig.cur!=='CAD';
+      const prefill = { title:e.title||'', amount:Math.abs(foreign ? e.orig.amount : e.amount)||0, paidBy:e.paidBy, cat:e.category, date:e.date, note:e.note||'', photo:e.photo||null,
+        cur: foreign ? e.orig.cur : 'CAD', ids: e.splitMode==='equal' && keys.length ? keys : null,
+        exact: e.splitMode!=='equal' && !foreign && e.amount>0 && keys.length ? sp : null };
+      if(cur) openExpense({existing:cur, prefill});
+      else openExpense({ctx: ctxOf({...e, people:e.people||[e.paidBy, ...keys], _priv: s[0]==='data'}), prefill, refund: e.amount<0});
+      return;
+    }
+  }
+  write(() => writeAll(b => { for(const x of ops) x.op==='delete' ? b.delete(db.doc(x.path)) : b[x.op](db.doc(x.path), x.data); }, it.label || undefined))
+    .then(ok => { if(ok) toast('Saved'); });
+}
+function notSavedCard(){
+  const list = notSavedList(); if(!LAPTOP || !list.length) return '';
+  return `<div class="banner nsbanner" style="margin-top:14px"><b>${list.length===1 ? 'A change wasn’t saved' : list.length+' changes weren’t saved'}</b>
+    <div style="margin-top:4px">${esc(notSavedText(list[list.length-1]))}</div>
+    <div style="margin-top:8px"><button class="btn sm" id="notSavedBtn">Review</button></div></div>`;
+}
+function openNotSaved(){
+  const draw = () => { const list = notSavedList().slice().reverse();
+    return list.length ? `<div class="card">${list.map(it => `<div class="row" style="flex-wrap:wrap"><div class="body" style="min-width:12em"><div class="t" style="white-space:normal">${esc(describeChange(it))}</div>
+      <div class="m" style="white-space:normal">${esc(whyNotSaved(it))}</div><small class="mut">${esc(syncedLabel(it.at))}</small></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end"><button class="btn sm primary" data-redo="${esc(it.id)}">Redo</button><button class="btn sm" data-dismiss="${esc(it.id)}">Dismiss</button></div></div>`).join('')}</div>`
+      : `<p class="note">Nothing waiting. Everything you changed got saved.</p>`; };
+  openSheet(head('Not saved') + `<p class="note" style="margin-top:0">These changes were made while the laptop couldn’t be reached, and it wouldn’t take them when it could. Nothing else was held up.</p><div id="nsList">${draw()}</div>
+    <div class="foot"><button class="btn" data-close>Close</button></div>`, sh => {
+    const bindIt = () => {
+      sh.querySelectorAll('[data-dismiss]').forEach(b => b.onclick = () => { window.HouseSplitOffline?.dismiss(b.dataset.dismiss); sh.querySelector('#nsList').innerHTML = draw(); bindIt(); netPill(); schedule(); });
+      sh.querySelectorAll('[data-redo]').forEach(b => b.onclick = () => { const it = notSavedList().find(x=>x.id===b.dataset.redo); if(!it) return; closeSheet(); setTimeout(() => redoChange(it), 250); });
+    };
+    bindIt();
+  });
+}
+// The laptop refused a change made offline (or it kept failing): say which one, and offer to redo it.
+window.addEventListener('hs-dropped', ev => {
+  const it = ev.detail || {}; if(it.by && myUid && it.by !== myUid) return;
+  buzz([20,60,20]); toast(notSavedText(it), {label:'Redo', fn:() => redoChange(it)});
+  netPill(); if(S.tab==='home' && !S.page) schedule();
+});
+// Sign out: this phone forgets your saved copy and anything still waiting, so the next person never sees it.
+async function signOutHere(el){
+  const off = window.HouseSplitOffline, n = off ? off.pending() : 0;
+  if(n && !confirmTap(el, `Tap again. ${n} change${n===1?'':'s'} not synced yet will be lost`)) return;
+  if(off) await off.signOut('/api/logout'); else location.href = '/api/logout';
+}
 document.getElementById('addBtn').onclick = () => {
   if(S.page?.type==='group') openExpense({ctx:{type:'group', id:S.page.id}});
   else if(S.page?.type==='friend' && !isGuestOnly(S.page.id)) openExpense({ctx:{type:'friend', id:S.page.id}});

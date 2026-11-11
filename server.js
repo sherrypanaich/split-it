@@ -1735,7 +1735,8 @@ async function handle(req, res) {
       if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/') && canRead(uid, k)) docs.push({ id: k.slice(prefix.length), data: v });
     return send(res, 200, { docs });
   }
-  if (p === '/api/write' && req.method === 'POST') {
+  // One change, or several that belong together (a move-out, "confirm all"): either all of them are saved or none.
+  if ((p === '/api/write' || p === '/api/batch') && req.method === 'POST') {
     const { ops } = await readBody(req);
     const r = writeOps(uid, ops);
     return send(res, r.status, r.body);
