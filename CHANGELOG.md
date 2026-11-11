@@ -42,6 +42,7 @@
 - 22 new tests start the real server and check who can see what, the money rules, sign-in, backups and the assistant. They run on GitHub for every pull request.
 
 ### Fixed
+- AI assistants now see your one-on-one balances with friends who aren't on the app (and carried-over balances). Before, they only saw groups. They can also add expenses and record payments with those friends, which stay private to you.
 - Changes made offline could be lost if you added another one while the first was still sending.
 - Moving a bill's next due date later (say Dec 1 to Jan 1) still charged the month in between.
 - Filling in an older variable bill used the bill's current split instead of the one it was posted with.

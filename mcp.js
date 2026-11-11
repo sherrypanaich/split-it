@@ -231,8 +231,31 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
   const groupsOf = uid => Object.entries(docs())
     .filter(([k, g]) => segs(k).length === 2 && segs(k)[0] === 'groups' && g && docs()[`groups/${segs(k)[1]}/members/${uid}`]?.active !== false && docs()[`groups/${segs(k)[1]}/members/${uid}`])
     .map(([k, g]) => ({ id: segs(k)[1], ...g }));
+  // Private one-on-ones live under data/users/{uid}/root/: friends/{id} (people not on the app, or your own
+  // notes about someone who is) and entries/{id} (expenses and payments with them). Only that person sees them.
+  const privRoot = uid => `data/users/${uid}/root/`;
+  const under = (pre, n) => Object.entries(docs()).filter(([k, v]) => v && k.startsWith(pre) && segs(k).length === n);
+  const privFriends = uid => under(privRoot(uid) + 'friends/', 6).map(([k, f]) => ({ id: segs(k)[5], ...f }));
+  const privEntries = uid => under(privRoot(uid) + 'entries/', 6).filter(([, e]) => !e.deletedAt && e.status !== 'needs_amount')
+    .map(([k, e]) => ({ ...e, _key: k, people: e.people || (e.kind === 'payment' ? [e.from, e.to] : [...new Set([e.paidBy, ...Object.keys(e.split || {})])]) }));
+  const isContact = (uid, id) => !h.users().users[id] && !!docs()[privRoot(uid) + 'friends/' + id];
+  // + means they owe uid, per other person, from uid's private entries (same rule as the page)
+  function privOwed(uid) {
+    const per = {};
+    for (const e of privEntries(uid)) {
+      if (e.kind === 'payment') { if (e.confirmed === false) continue;
+        if (e.from === uid) per[e.to] = (per[e.to] || 0) + e.amount; else if (e.to === uid) per[e.from] = (per[e.from] || 0) - e.amount; continue; }
+      for (const [id, c] of Object.entries(e.split || {})) {
+        if (e.paidBy === uid && id !== uid) per[id] = (per[id] || 0) + c;
+        else if (id === uid && e.paidBy !== uid) per[e.paidBy] = (per[e.paidBy] || 0) - c;
+      }
+    }
+    return per;
+  }
+  let viewer = null;   // who is asking, while a tool runs, so their private friends' names can be used
   function nameOf(id) {
     if (h.users().users[id]) return h.nameFor(id);
+    if (viewer) { const f = docs()[privRoot(viewer) + 'friends/' + id]; if (f?.name) return f.name; }
     for (const [k, m] of Object.entries(docs())) if (k.endsWith('/members/' + id) && m?.name) return m.name;
     return 'Someone';
   }
@@ -264,7 +287,8 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     for (let k = 0; k < amount - b * n; k++) out[ids[(start + k) % n]]++;
     return out;
   }
-  function save(uid, id, data) {
+  function save(uid, id, data, priv) {
+    if (priv) { const p = privRoot(uid) + 'entries/' + id; docs()[p] = data; h.saveDb(); h.broadcast([p]); return; }   // only this person sees it, so nobody to tell
     const p = 'expenses/' + id, before = { [p]: docs()[p] };
     docs()[p] = data;
     h.saveDb(); h.broadcast([p]);
@@ -275,14 +299,18 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
   // ---------- tools ----------
   const tools = [
     { name: 'get_balances', title: 'Who owes whom',
-      description: 'Shows what the signed-in person owes and is owed in Split it, across all groups and one-on-one expenses, in Canadian dollars.',
+      description: 'Shows what the signed-in person owes and is owed in Split it, one line per person, across all groups, one-on-one expenses and their private one-on-ones with friends who are not on the app, in Canadian dollars.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true },
       run(uid) {
-        const lines = [], debts = h.allDebts(); let net = 0;
-        for (const [k, amt] of Object.entries(debts)) {
+        const per = privOwed(uid);   // + they owe you
+        for (const [k, amt] of Object.entries(h.allDebts())) {
           const [from, to] = k.split('|');
-          if (from === uid) { lines.push(`You owe ${nameOf(to)} ${cad(amt)}`); net -= amt; }
-          if (to === uid) { lines.push(`${nameOf(from)} owes you ${cad(amt)}`); net += amt; }
+          if (from === uid) per[to] = (per[to] || 0) - amt;
+          if (to === uid) per[from] = (per[from] || 0) + amt;
+        }
+        const lines = []; let net = 0;
+        for (const [id, v] of Object.entries(per).filter(([, v]) => v).sort((x, y) => Math.abs(y[1]) - Math.abs(x[1]))) {
+          lines.push(v > 0 ? `${nameOf(id)} owes you ${cad(v)}` : `You owe ${nameOf(id)} ${cad(-v)}`); net += v;
         }
         if (!lines.length) return `${h.nameFor(uid)}, you’re all square with everyone.`;
         return `Balances for ${h.nameFor(uid)}:\n- ${lines.join('\n- ')}\nOverall: ${net > 0 ? 'you’re owed ' + cad(net) : net < 0 ? 'you owe ' + cad(-net) : 'all square'}.`;
@@ -300,20 +328,20 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         }).join('\n');
       } },
     { name: 'recent_expenses', title: 'Recent expenses',
-      description: 'Lists recent Split it expenses and payments that include the signed-in person, newest first. Optionally only one group.',
+      description: 'Lists recent Split it expenses and payments that include the signed-in person, newest first, including private one-on-ones with friends who are not on the app. Optionally only one group.',
       inputSchema: { type: 'object', properties: { group: { type: 'string', description: 'Group name (optional)' }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 10 } }, additionalProperties: false },
       annotations: { readOnlyHint: true },
       run(uid, a) {
         let gid;
         if (a.group) { const r = findGroup(uid, a.group); if (r.err) throw new Error(r.err); gid = r.g.id; }
-        const list = h.sharedEntries().filter(e => (e.people || []).includes(uid) && (!gid || e.groupId === gid))
+        const list = [...h.sharedEntries().filter(e => (e.people || []).includes(uid) && (!gid || e.groupId === gid)), ...(gid ? [] : privEntries(uid))]
           .sort((x, y) => (y.date || '').localeCompare(x.date || '') || (y.createdAt || 0) - (x.createdAt || 0))
           .slice(0, Math.min(50, Math.max(1, a.limit || 10)));
         if (!list.length) return 'No expenses yet.';
-        const gname = id => id ? docs()['groups/' + id]?.name || 'a group' : 'one-on-one';
+        const gname = (id, e) => id ? docs()['groups/' + id]?.name || 'a group' : e?._key ? 'one-on-one with ' + nameOf(e.friendId || e.people.find(p => p !== uid)) : 'one-on-one';
         return list.map(e => e.kind === 'payment'
-          ? `${e.date}: ${label(e.from, uid)} paid ${label(e.to, uid)} ${cad(e.amount)}${e.confirmed === false ? ' (not confirmed yet)' : ''} [${gname(e.groupId)}]`
-          : `${e.date}: ${e.title || 'Expense'} ${cad(e.amount)}, paid by ${label(e.paidBy, uid)}, your share ${cad((e.split || {})[uid] || 0)} [${gname(e.groupId)}]`).join('\n');
+          ? `${e.date}: ${label(e.from, uid)} paid ${label(e.to, uid)} ${cad(e.amount)}${e.confirmed === false ? ' (not confirmed yet)' : ''} [${gname(e.groupId, e)}]`
+          : `${e.date}: ${e.title || 'Expense'} ${cad(e.amount)}, paid by ${label(e.paidBy, uid)}, your share ${cad((e.split || {})[uid] || 0)} [${gname(e.groupId, e)}]`).join('\n');
       } },
     { name: 'add_expense', title: 'Add an expense',
       description: 'Adds a shared expense to Split it. Give either a group name, or one person (for a one-on-one expense). By default the signed-in person paid and everyone active in the group (or both people) shares it equally. For an uneven split give shares (weights, like 2 for a couple and 1 for a single) or exact_amounts (dollars per person, adding up to the total). Confirm the details with the user before calling. Amounts are Canadian dollars.',
@@ -339,8 +367,8 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         if (a.group) { const r = findGroup(uid, a.group); if (r.err) throw new Error(r.err); g = r.g; pool = memberDocs(g.id).filter(m => m.active !== false).map(m => m.id); }
         else {
           if (!a.with_person) throw new Error('Give a group, or with_person for a one-on-one expense.');
-          const others = Object.keys(h.users().users).filter(id => id !== uid);
-          const r = pick(a.with_person, others); if (r.err) throw new Error(r.err + ' (One-on-one only works with people who use the app; use a group for others.)');
+          const others = [...new Set([...Object.keys(h.users().users).filter(id => id !== uid), ...privFriends(uid).filter(f => f.kind === 'contact').map(f => f.id)])];
+          const r = pick(a.with_person, others); if (r.err) throw new Error(r.err + ' (Add them as a friend in the app first, or use a group.)');
           if (r.id === '__me__') throw new Error('with_person is the other person, not you.');
           pool = [uid, r.id];
         }
@@ -364,9 +392,10 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
           split = splitEqual(amount, ids); splitInput = { ids };
         }
         if (!g && ids.some(id => !pool.includes(id))) throw new Error('A one-on-one expense can only be split between the two of you.');
+        const priv = !g && isContact(uid, pool[1]);
         save(uid, id, { kind: 'expense', title, amount, paidBy, split, splitMode, splitInput, category: CATS.includes(a.category) ? a.category : 'other',
           date, note: String(a.note || '').slice(0, 200), orig: null, photo: null, people: [...new Set([paidBy, ...ids])],
-          groupId: g ? g.id : null, createdAt: Date.now(), addedBy: uid, via: 'assistant' });
+          ...(priv ? { friendId: pool[1] } : { groupId: g ? g.id : null }), createdAt: Date.now(), addedBy: uid, via: 'assistant' }, priv);
         return `Added "${title}" ${cad(amount)}${g ? ' in ' + g.name : ' with ' + nameOf(pool[1])}, paid by ${label(paidBy, uid)}, ${how} ${ids.map(i => label(i, uid)).join(', ')} (${ids.map(i => cad(split[i])).join(' / ')}). ${split[uid] ? 'Your share: ' + cad(split[uid]) + '.' : 'You’re not in this split.'}`;
       } },
     { name: 'record_payment', title: 'Record a payment',
@@ -380,11 +409,11 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         if (!(amount > 0) || amount > 1e8) throw new Error('Amount must be more than $0.');
         let g = null, pool;
         if (a.group) { const r = findGroup(uid, a.group); if (r.err) throw new Error(r.err); g = r.g; pool = memberDocs(g.id).filter(m => m.active !== false).map(m => m.id); }
-        else pool = Object.keys(h.users().users);
+        else pool = [...new Set([...Object.keys(h.users().users), ...privFriends(uid).filter(f => f.kind === 'contact').map(f => f.id)])];
         const r = pick(a.to, pool.filter(id => id !== uid)); if (r.err) throw new Error(r.err); if (r.id === '__me__') throw new Error('You can’t pay yourself. Give the name of the person you paid.');
-        const to = r.id, confirmed = !h.users().users[to];
+        const to = r.id, confirmed = !h.users().users[to], priv = !g && isContact(uid, to);
         const id = 'p' + rand(6).replace(/[^A-Za-z0-9]/g, '') + Date.now().toString(36).slice(-3);
-        save(uid, id, { kind: 'payment', from: uid, to, amount, date: today(), createdAt: Date.now(), addedBy: uid, confirmed, people: [uid, to], groupId: g ? g.id : null, via: 'assistant' });
+        save(uid, id, { kind: 'payment', from: uid, to, amount, date: today(), createdAt: Date.now(), addedBy: uid, confirmed, people: [uid, to], ...(priv ? { friendId: to } : { groupId: g ? g.id : null }), via: 'assistant' }, priv);
         return `Recorded: you paid ${nameOf(to)} ${cad(amount)}${g ? ' for ' + g.name : ''}.${confirmed ? '' : ` ${nameOf(to)} will be asked to confirm it in Split it.`}`;
       } },
     { name: 'settle_up_plan', title: 'Who should pay whom',
@@ -439,7 +468,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
       run(uid) {
         const cutoff = Date.now() - 10 * 60e3;
-        const mine = Object.entries(docs()).filter(([k, e]) => k.startsWith('expenses/') && k.split('/').length === 2 && e && !e.deletedAt && e.addedBy === uid && e.via === 'assistant' && e.createdAt > cutoff)
+        const mine = Object.entries(docs()).filter(([k, e]) => ((k.startsWith('expenses/') && k.split('/').length === 2) || (k.startsWith(privRoot(uid) + 'entries/') && segs(k).length === 6)) && e && !e.deletedAt && e.addedBy === uid && e.via === 'assistant' && e.createdAt > cutoff)
           .sort((a, b) => b[1].createdAt - a[1].createdAt);
         if (!mine.length) return 'Nothing to undo: you haven’t added anything through an assistant in the last 10 minutes.';
         const [k, e] = mine[0];
@@ -468,8 +497,10 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     if (method === 'tools/call') {
       const t = tools.find(x => x.name === params.name);
       if (!t) return fail(-32602, 'Unknown tool: ' + params.name);
+      viewer = uid;
       try { return ok({ content: [{ type: 'text', text: t.run(uid, params.arguments || {}) }] }); }
       catch (e) { return ok({ content: [{ type: 'text', text: e.message }], isError: true }); }
+      finally { viewer = null; }
     }
     return fail(-32601, 'Method not found: ' + method);
   }

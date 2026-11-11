@@ -476,3 +476,35 @@ test('each person links their own assistants from the app, and only they can dis
   assert.strictEqual(again.status, 400);
   assert.strictEqual((await cat.post('/api/assistants/remove', {})).status, 400);
 });
+
+test('an assistant sees private one-on-ones with friends who are not on the app, and nobody else does', async () => {
+  const root = `data/users/${cat.uid}/root`;
+  assert.strictEqual((await cat.write(
+    { op: 'set', path: `${root}/friends/f_raja`, data: { name: 'Raja', kind: 'contact' } },
+    { op: 'set', path: `${root}/friends/f_moe`, data: { name: 'Moe', kind: 'contact' } },
+    { op: 'set', path: `${root}/entries/e_raja1`, data: { kind: 'expense', title: 'Carried over', amount: 40708, paidBy: cat.uid, split: { f_raja: 40708 }, splitMode: 'exact', people: [cat.uid, 'f_raja'], friendId: 'f_raja', date: '2026-11-01', createdAt: Date.now(), addedBy: cat.uid } },
+    { op: 'set', path: `${root}/entries/e_moe1`, data: { kind: 'expense', title: 'Concert', amount: 9000, paidBy: 'f_moe', split: { [cat.uid]: 4500, f_moe: 4500 }, splitMode: 'equal', people: ['f_moe', cat.uid], friendId: 'f_moe', date: '2026-11-03', createdAt: Date.now(), addedBy: cat.uid } },
+    { op: 'set', path: `${root}/entries/e_moe2`, data: { kind: 'expense', title: 'Old one', amount: 500, paidBy: cat.uid, split: { f_moe: 500 }, people: [cat.uid, 'f_moe'], friendId: 'f_moe', date: '2026-10-01', createdAt: Date.now(), addedBy: cat.uid, deletedAt: Date.now() } })).status, 200);
+  const key = /(hsk_\S+)/.exec(cli(['mcp-key', 'Cat']))[1];
+
+  const bal = (await tool(key, 'get_balances')).text;
+  assert.match(bal, /Raja owes you \$407\.08/, bal);
+  assert.match(bal, /You owe Moe \$45\.00/, bal);
+  assert.ok(!/\$5\.00/.test(bal), 'deleted ones do not count');
+  const recent = (await tool(key, 'recent_expenses')).text;
+  assert.match(recent, /Carried over \$407\.08.*one-on-one with Raja/, recent);
+
+  const add = await tool(key, 'add_expense', { title: 'Lunch', amount: 20, with_person: 'Raja' });
+  assert.ok(!add.isError, add.text);
+  const saved = (await cat.col(`${root}/entries`)).data.docs.map(d => d.data).find(e => e.title === 'Lunch');
+  assert.deepStrictEqual([saved.friendId, saved.groupId, saved.split.f_raja], ['f_raja', undefined, 1000]);
+  assert.ok(!(await cat.col('expenses')).data.docs.some(d => d.data.title === 'Lunch'), 'it stays private');
+  assert.ok(!(await tool(key, 'record_payment', { to: 'Moe', amount: 45 })).isError);
+  assert.match((await tool(key, 'get_balances')).text, /Raja owes you \$417\.08/);
+  assert.ok(!/Moe/.test((await tool(key, 'get_balances')).text), 'paying Moe back squares it');
+  assert.match((await tool(key, 'delete_last_expense')).text, /payment/);
+
+  const benKey = /(hsk_\S+)/.exec(cli(['mcp-key', 'Ben']))[1];
+  for (const t of ['get_balances', 'recent_expenses']) assert.ok(!/Raja|Moe|Carried over/.test((await tool(benKey, t)).text), 'Ben’s assistant sees none of it: ' + t);
+  assert.ok((await tool(benKey, 'add_expense', { title: 'x', amount: 1, with_person: 'Raja' })).isError);
+});
