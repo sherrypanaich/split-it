@@ -47,7 +47,13 @@
   const newKey = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   // older versions kept one change per item: {op, path, data, by}
   const norm = it => it && Array.isArray(it.ops) ? it : { id: newKey(), ops: [{ op: it.op, path: it.path, data: it.data }], by: it.by || null, tries: 0, at: Date.now() };
-  const queue = () => { const qq = ls.get(QKEY, []); return Array.isArray(qq) ? qq.filter(Boolean).map(norm) : []; };
+  // An old item is converted once and stored back, so it keeps the same id (and is sent once) from then on.
+  const queue = () => {
+    const qq = ls.get(QKEY, []); if (!Array.isArray(qq)) return [];
+    const raw = qq.filter(Boolean), out = raw.map(norm);
+    if (out.some((x, i) => x !== raw[i])) ls.set(QKEY, out);
+    return out;
+  };
   const setQueue = qq => { ls.set(QKEY, qq); window.dispatchEvent(new CustomEvent('hs-queue', { detail: { pending: qq.length } })); };
   const aside = () => { const a = ls.get(AKEY, []); return Array.isArray(a) ? a : []; };
   const setAside = a => { ls.set(AKEY, a.slice(-30)); window.dispatchEvent(new CustomEvent('hs-aside', { detail: { count: a.length } })); };

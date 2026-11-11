@@ -172,3 +172,18 @@ test('a change whose sending keeps breaking off is set aside too, once the lapto
   assert.strictEqual(p.off.pending(), 0);
   assert.deepStrictEqual(plain(p.dropped().map(x => x.reason)), ['stuck']);
 });
+
+test('changes left waiting by the previous release (one change per item) are each sent exactly once', async () => {
+  const srv = laptop(), store = new Map();
+  store.set('hs-queue', JSON.stringify([
+    { op: 'set', path: 'expenses/e1', data: expense('Pizza', 2400) },
+    { op: 'update', path: 'expenses/e1', data: { title: 'Pizza night' } },
+    { op: 'delete', path: 'expenses/e2' }
+  ]));
+  const p = phone(srv.handle, store);
+  await (await p.user()).id();
+  await p.off.flush();
+  for (let i = 0; i < 20 && p.off.pending(); i++) await settle();   // signing in already started sending them
+  assert.strictEqual(p.off.pending(), 0);
+  assert.deepStrictEqual(srv.writes.map(w => [w.body.ops[0].op, w.body.ops[0].path]), [['set', 'expenses/e1'], ['update', 'expenses/e1'], ['delete', 'expenses/e2']]);
+});
