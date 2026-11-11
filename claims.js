@@ -28,6 +28,9 @@ module.exports = function claims(h) {
   const priv = uid => `data/users/${uid}/root/`;
   const clone = v => v == null ? null : JSON.parse(JSON.stringify(v));
   const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  // the version and change log the server keeps on each entry don't count as "changed since"
+  const bare = d => { if (!d || typeof d !== 'object') return d; const { v, changes, editedAt, editedBy, ...rest } = d; return rest; };
+  const stamp = (uid, path, before, after) => h.stamp ? h.stamp(uid, path, before, after) : after;
   const today = () => new Date().toISOString().slice(0, 10);
 
   // ---------- what a claim covers ----------
@@ -179,9 +182,9 @@ module.exports = function claims(h) {
   }
 
   // ---------- doing it, and undoing it ----------
-  function apply(changes) {
+  function apply(changes, uid) {
     const D = docs(), before = {};
-    for (const [p, v] of Object.entries(changes)) { before[p] = D[p] ?? null; if (v == null) delete D[p]; else D[p] = v; }
+    for (const [p, v0] of Object.entries(changes)) { before[p] = D[p] ?? null; const v = stamp(uid, p, before[p], v0); if (v == null) delete D[p]; else D[p] = v; }
     saveDb(); broadcast(Object.keys(changes), null, before);
   }
   function accept(c, to) {
@@ -189,15 +192,15 @@ module.exports = function claims(h) {
     c.changes = Object.entries(p.changes).map(([path, after]) => ({ path, before: p.before[path], after: clone(after) }));
     c.summary = p.summary; c.status = 'yes'; c.to = to; c.answeredAt = now();
     save();
-    apply(p.changes);
+    apply(p.changes, to);
     refresh([c.by, to]);
     return p.summary;
   }
   function undo(c) {
-    const D = docs(), changed = c.changes.filter(ch => !same(D[ch.path], ch.after));
+    const D = docs(), changed = c.changes.filter(ch => !same(bare(D[ch.path]), bare(ch.after)));
     if (changed.length) return `${changed.length} of those entries changed since, so undo would mix things up. Fix them by hand instead.`;
     const back = {}; for (const ch of c.changes) back[ch.path] = clone(ch.before);
-    apply(back);
+    apply(back, c.by);
     c.status = 'undone'; c.undoneAt = now(); delete c.changes; save();
     refresh([c.by, c.to]);
     return null;
