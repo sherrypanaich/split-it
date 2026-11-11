@@ -3085,7 +3085,8 @@ function openExpense(opts={}){
           const f2 = toCents(st.paid2), b = st.cur===HOME ? f2 : Math.min(cad-1, Math.max(1, Math.round(f2*(rate()*(1+fee()/100))))), id2 = newId('e');
           const s1 = splitShares(cad-b, split, id), s2 = {}; for(const [k,v] of Object.entries(split)) if(v-(s1[k]||0) > 0) s2[k] = v-(s1[k]||0);
           const ref2 = priv ? privDoc().collection('entries').doc(id2) : db.doc('expenses/'+id2);
-          const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact:sp}, orig: origOf(oa),
+          // the exact amounts are kept in the currency the form shows, so the entry can be edited later
+          const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact: st.cur===HOME ? sp : splitShares(oa, sp, id)}, orig: origOf(oa),
             photo: n===1 ? body.photo : null, people:[...new Set([by, ...Object.keys(sp)])], pair:{id, n, total:cad, other: n===1 ? id2 : id},
             ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now()+n-1, addedBy:myUid});
           done = await write(() => writeAll(w => { w.set(ref, part(1, st.paidBy, cad-b, s1, a-f2)); w.set(ref2, part(2, st.paidBy2, b, s2, f2)); }, `Your expense ‘${body.title||'Expense'} ${money(cad)}’`));
