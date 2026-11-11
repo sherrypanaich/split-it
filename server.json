@@ -1,0 +1,31 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.sherrypanaich/split-it",
+  "title": "Split it",
+  "description": "Self-hosted bill splitting for housemates: balances, expenses, payments and bills",
+  "version": "2.2.0",
+  "websiteUrl": "https://splitit.budgetit.ca",
+  "repository": {
+    "url": "https://github.com/sherrypanaich/split-it",
+    "source": "github"
+  },
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/sherrypanaich/split-it/main/public/icon-512.png",
+      "mimeType": "image/png",
+      "sizes": ["512x512"]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://{address}/mcp",
+      "variables": {
+        "address": {
+          "description": "The web address of your own Split it server, without https:// (for example home.example.com)",
+          "isRequired": true
+        }
+      }
+    }
+  ]
+}
