@@ -13,7 +13,7 @@ What's in this repo:
 - `server.js` runs the app. No npm packages to install, just Node.js 22 or newer.
 - `public/` is the app page and sign-in pages.
 - `data/` is created on first run and never committed. It holds everything: `db.json` (groups and expenses), `users.json` (sign-ins), `photos/` (receipt photos), `push.json` and `push-keys.json` (phone notifications), and `backups/` (a copy of the records at every start and every 6 hours, one a day for 30 days, and one every Sunday for a year).
-- `test/` checks the split rules and the whole server (who can see what, the money rules, sign-in, backups). `node --test test/*.test.js` runs it. `scripts/smoke-docker.sh` checks the Docker image before a release.
+- `test/` checks the split rules and the whole server (who can see what, the money rules, sign-in, backups). `node --test test/*.test.js` runs it. `test/e2e-flows.test.js` walks a whole household through the app on three phones; it needs Playwright with Chromium (otherwise it's skipped) and takes about 2 minutes. `scripts/smoke-docker.sh` checks the Docker image before a release.
 - `Dockerfile` and `compose.yaml` if you'd rather run it in a container (`docker compose up -d`, then `docker compose exec split-it node server.js add-user YOU`). Inside the container the app runs as an ordinary user, not root.
 - `docs/` is the website, served by GitHub Pages.
 
@@ -216,7 +216,8 @@ On the laptop, `data/backups/` keeps a copy of the records at every start and ev
 - From the laptop (best for big backups, and works while the app runs): `node server.js restore FILE`. In Docker: `docker compose exec split-it node server.js restore /backup-copy/split-it-backup-2026-11-11.locked` (the file has to be inside the container, for example in the mounted backup folder). It accepts a `.zip`, a `.locked` file or a daily `db-….json`. For a locked file it uses `BACKUP_PASSPHRASE`, or asks for the passphrase if that isn't set. To type a different one: `BACKUP_PASSPHRASE= node server.js restore FILE`. Photos are brought back from the `photos/` folder next to the file.
 - From the app: tap your picture, then **People, backups and health**, then **Restore a backup**. It takes a zip, a locked file (it asks for the passphrase) or any of the daily files. Cloudflare's free plan stops uploads over 100 MB, so use the laptop command for anything bigger.
 - A restore checks the whole file first and refuses one that isn't Split it data. What was there before is kept in `data/backups/before-restore-…`, so a restore can be undone.
-- A restore keeps the sign-ins and phone notification settings the laptop has now. After a move to a new laptop, everyone signs in again and turns phone notifications back on.
+- A restore keeps the sign-ins, phone notification settings and connected AI assistants the laptop has now. After a move to a new laptop, everyone signs in again and turns phone notifications back on.
+- Assistants that were connected only in the backup have to connect again. On a new laptop with no assistants yet, the assistants from the backup are kept.
 - Do one test restore into a spare copy of the app before you need a real one.
 
 ## Away from wifi
@@ -224,6 +225,8 @@ On the laptop, `data/backups/` keeps a copy of the records at every start and ev
 Once a phone has opened Split it, it opens without a connection too: it shows what it last had, and anything added while offline waits in a queue and is sent when the laptop is reachable again. A small pill at the top says when that's happening ("Waiting to sync (N)") and when the phone last caught up.
 
 If the laptop refuses a change you made offline (say the shares don't add up, or someone changed that expense in the meantime), the app tells you which change it was and offers **Redo**. Changes that keep failing are set aside after a few tries, so the rest still get through. Set-aside changes stay in a **Not saved** list (on Home and in the pill at the top) until you redo or dismiss them. Signing out clears this phone's saved copy of your data. Each person's copy is kept apart, so on a shared phone nobody sees the last person's numbers.
+
+Sign out (in your profile) needs the laptop to be reachable. It also turns that phone's notifications off, so the next person doesn't get yours.
 
 ## On your phone
 

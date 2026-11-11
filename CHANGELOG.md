@@ -16,8 +16,8 @@
 ### New
 - History on every expense and payment: the last 20 changes, with who, when, and the old and new amount, title, date, shares and who paid.
 - Activity for each group: a new Activity button on the group page lists recent adds, changes, removals and payments. Tap one to open it.
-- "This changed since you opened it": if someone else saves an expense while you have it open, your save is stopped instead of overwriting theirs, and the app shows you the new version.
-- Hand a group over: the person who made a group can pass it to someone else in it, from Group settings.
+- Two people editing at once: if someone else saves an expense while you have it open, your save is stopped instead of overwriting theirs. The app says "Someone else changed this while you had it open. Have a look and try again." and shows you the new version.
+- Hand a group over: the person who runs a group can pass it to someone else in it, from Group settings.
 - Download my data and Delete my data, in your profile under Your data and privacy. Deleting needs your password. Expenses you share with others stay, shown as "Former member", so nobody's balance changes, and groups you made pass to someone still in them.
 - Not saved list: changes the laptop couldn't save stay on Home and in the pill at the top until you tap Redo (the form opens again with what you typed) or dismiss them. The pill also says "Waiting to sync (N)" and when the phone last caught up.
 - Bring old expenses along: invite someone you've been tracking by name (a private contact, or a name-only member of a group) and their invite link carries that history. After they join they see what's waiting, with every entry and their share, and tap "Yes, that's me" or "Not me". Someone already on Split it gets the same choice as a request. The server moves everything in one step and checks that every balance comes out the same; either of you can undo it for 7 days. Anyone in a group can hand over its name-only member, and the group gets a notification. Private expenses that also include other people not on the app stay with you, and the new person gets one "Carried over from before you joined" line for their part.
@@ -48,7 +48,7 @@
 
 ### Improved
 - When someone removes an expense or payment you're in, you get a notification ("Ana removed Hydro") and a message in the app, with a link to it in Recently deleted.
-- When the server refuses a change, the app gives the server's own reason in plain words, for example "Only Ana, who made this group, can rename it".
+- When the server refuses a change, the app gives the server's own reason in plain words, for example "Only Ana, who runs this group, can rename it", instead of a general "You don't have permission". Group messages name whoever runs the group now, so they stay right after a hand-over.
 - Your profile says plainly who can see what: groups are private from housemates who aren't in them, but not from whoever runs the laptop.
 - You stay signed in while you use Split it: each day you open it, your sign-in runs another 90 days.
 - Too many wrong passwords for one account now slow its sign-in down for a short while instead of locking that person out. Five misses from one visitor still mean a 15 minute wait for that visitor.
@@ -71,7 +71,17 @@
 - Keyboard: sheets take focus when they open, keep Tab inside, and give focus back when they close. Your guide can be reached with Tab and opened with Enter.
 - Better contrast for the green "owed" text in light mode and for initials on bright colours. Images are a little smaller.
 - The group page's buttons wrap on very narrow phones instead of running off the edge.
-- New tests start the real server and check who can see what, the money rules, sign-in (also behind Cloudflare and Traefik), backups and the assistant, and that text people type never runs as code. The release check also tests the Docker image: build, start, sign in, save, restart, and check nothing was lost.
+- New tests start the real server and check who can see what, the money rules, sign-in (also behind Cloudflare and Traefik), backups and the assistant, and that text people type never runs as code. Browser tests walk a whole household through the app on three phones, and check updating from v2.1, offline use, a shared phone and the Claude preview. The release check also tests the Docker image: build, start, sign in, save, restart, and check nothing was lost.
+- Friend requests and history hand-overs show up on the other person's open page right away, instead of after up to a minute or a reload.
+- Deleting one part of a "Two people paid" expense moves both parts to Recently deleted, and putting one back puts both back. Before, the other part kept counting.
+- After someone takes over history logged under their name, the expense history says "Mohit took over the share logged before they joined" instead of listing the same name twice.
+- Tapping Done on a chore that comes back to you says "Your turn next".
+- Easier on a phone: small buttons, chips, the style switches, colour dots, the close (×) button, the calendar arrows and links like "Forgot password?" are at least 40px tall. An expense's Edit, Copy, Favourite and Delete fit (Delete ran off the edge). Long sheet titles and labels wrap instead of being cut off.
+- A typed amount the app can't read is explained right under the amount box. The owner's page lists its warnings one under the other. The join page shows which box you're typing in.
+- Clearer words: the Not saved message reads as two sentences with times like "6:43 a.m.", history handed to you shows dates like "Jul 14", a trip expense says "rate from Nov 8", the bills calendar says "Download a copy", and assistant keys say "Paste it where your assistant asks for an API key or token".
+- Bills calendar: the note comes before "Make a new link", and the second tap resets after a few seconds like everywhere else.
+- Screen readers: the calendar link box has a label, the amount box says when its amount is wrong, and handing a group over reads out the "Tap again" step.
+- The AI assistant: `add_expense` and `record_payment` take `again: true` for a real repeat within 2 minutes. `list_groups` and `get_balances` give back structured data too, and each person in `get_balances` also carries `amount`.
 - The website now says running Split it and Budget it together costs $70 a month, with bank linking in Budget it costing extra.
 
 ### Fixed
@@ -85,7 +95,7 @@
 - A full disk crashed the app over and over. Now it keeps showing everything, says plainly that new changes can't be saved, tries again by itself and warns the owner. Refused changes are never shown as saved.
 - If `db.json` was damaged and the app started from a backup copy, nobody was told. The owner now sees a banner naming the copy and when it was taken. A file of the wrong shape (like `{"docs":null}`) now counts as damaged too.
 - A restore checks the whole file before replacing anything, and refuses one that isn't Split it data (empty or the wrong shape) with a clear message.
-- Backup names and "today" used UTC dates in a few places. They now use the local date.
+- Backup names, "today", the "Carried over from before you joined" line and the "Download my data" file name used UTC dates in places. They now use the laptop's own day (`TZ`).
 - Amount boxes no longer guess. "12,50" is $12.50 and "1,234.56" still works, but "1.234,56" (which became $1.23) or "10-15" (which became $1015) gets a short note and can't be saved. Quick add leaves an unclear amount empty and says why.
 - An AI assistant that tried again after a slow answer could add the same expense or payment twice. A repeat within 2 minutes now gets "Already added".
 - A bill kept charging someone who had left if the move-out helper wasn't used.
@@ -101,15 +111,37 @@
 - One badly encoded cookie from another app on the same laptop could stop every page from loading.
 - The only owner could remove their own owner status, leaving nobody able to open the owner tools.
 - A Splitwise import marked every payment as received. Payments to someone who uses Split it now wait for them to confirm, like any other.
+- Delete my data didn't pause the bills that person paid or shared in, so they kept charging a "Former member". Now they pause and the group is asked who takes over, as when someone leaves.
+- Someone who moved out stayed in chore rotations: it still became their turn, and they still got "Your turn" reminders.
+- "Two people paid" in a trip currency: neither entry could be edited again (Save stayed off).
+- A former member was called "Former" ("Who takes over Former's share?").
+- A friend's page you had open turned into an empty "Former member" page when that friend took over their history. It now goes back to the friends list.
+- Taking over history showed the "PAID!" celebration, though nobody paid anything.
+- Remind copied "You owe $12" to someone who had already marked those $12 as paid.
+- With `HOME_CURRENCY` set: Redo on a change that wasn't saved treated a home-currency expense as a foreign one, and a zero balance showed "$0" in group settings.
+- Friend requests no longer buzz over and over: asking, taking it back and asking again notifies the other person once an hour at most, and reusing a friend link when you're already friends sends nothing.
+- A request the app can't read (not JSON, or empty) gets a clear "wasn't readable" answer instead of a server error, everywhere including the assistant connector and its sign-in pages.
+- If the exchange-rate file can't be written, everything else still saves. Before, it made the app refuse every change as if the disk were full.
+- Expenses, payments and "undo my last entry" from an assistant in a private one-on-one go through the same checks as the app. On a full disk the assistant hears "Nothing was added" instead of being told it worked.
+- On a full disk: opening the app or signing out no longer shows an error page, the list of hand-overs still shows, and taking over history says so before anything moves. A hand-over is written to disk straight away, like any expense.
+- Phone notifications give up on a push service after 10 seconds, and subscriptions made with an old sending key are dropped.
+- Changes made offline before updating to this version are sent once. The first could be sent twice.
+- Signing out away from wifi half signed you out: the phone forgot its copy but stayed signed in as you. Now it says you're offline and to sign out once the laptop can be reached.
+- Right after an update, and on the very first visit, the app opens away from wifi straight away instead of showing "Can't reach Split it" until it was opened once more on wifi.
+- Opening the app offline before your profile was saved no longer throws an error in the background.
+- In the Claude preview, Add friend no longer asks the missing laptop for invite links, and Activity no longer says "the laptop keeps the record".
 
 ### Security
 - Every expense and payment is checked on the server, including ones an AI assistant adds: whole cents, shares that add up to the total, only people in the group, and logged under the person who added it.
 - A payment only counts once the person who was paid confirms it. Nobody else can mark it received, even by talking to the server directly.
-- Only the person who made a group can rename it, delete it, hand it over or take someone else out. Anyone can leave by themselves, and whoever added a name-only guest can take that guest out.
+- Only the person who runs a group can rename it, delete it, hand it over or take someone else out. Anyone can leave by themselves, and whoever added a name-only guest can take that guest out.
 - "Edited by" and the change history are set by the laptop, not the phone, so they can't be faked.
 - Only the app's own kinds of data can be stored or read. One record can be up to 256 KB, and one person can keep up to 20,000 records of a kind.
 - Sign-in tokens are stored hashed, so a copy of a backup can't be used to sign in as anyone.
 - Backups no longer hold sign-ins, open invite links, one-time assistant codes, phone notification subscriptions or the notification sending key. A restore keeps the ones the laptop has now, so after a move to a new laptop everyone signs in again and turns notifications back on.
+- Restoring a backup keeps the AI assistants connected now and never brings back one that was disconnected after the backup was made (say after "Sign out everywhere" or a password reset). A laptop with no assistants yet (a move to a new laptop) takes them from the backup.
+- Signing out and "Sign out everywhere" turn this phone's notifications off first, so the next person on a shared phone doesn't get the last person's. If someone signs in where the last person didn't sign out, that person's notifications on this phone end.
+- Friend requests and hand-overs can't be sent to built-in names like `__proto__`, and the assistant sign-in pages no longer crash on them.
 - Locked backups use AES-256-GCM with a key made from your passphrase. Receipt photos in the copy folder are locked one by one too.
 - Download my data never includes password hashes, sign-in code secrets or the calendar link. Delete my data needs your password, and wrong tries count toward the sign-in limit.
 - Changing your email asks for your current password or a sign-in code. If you sign in only with Google, it works within 10 minutes of signing in.
@@ -132,6 +164,10 @@
 - Older groups that never recorded who made them keep the old rule: anyone in them can rename them or move people out.
 - Photos removed from the laptop stay in the backup folder's `photos/` (on purpose); clear old ones by hand.
 - The sign-in code needs the key typed or opened on the same phone. There is no QR code to scan yet.
+- "Sign out everywhere" turns notifications off only on the phone you tap it on. Other phones keep getting them until they're turned off there.
+- On a shared phone, a change someone left waiting is dropped without a word when another person signs in (Sign out warns about this). Changes left waiting by v2.1 are sent under whoever signs in next.
+- Bringing someone back into a group doesn't put them back into chores. Edit the chore to add them.
+- Bills the laptop adds by itself have no "added" line in their history; it starts at the first edit.
 - The server checks, history, sign-in code, backups and laptop commands only apply to the laptop app, not the Claude artifact preview.
 
 ## v2.1.0 · November 9, 2026
