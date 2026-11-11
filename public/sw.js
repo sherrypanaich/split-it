@@ -1,6 +1,6 @@
 // Split it service worker: lets phones install the app, keeps a copy of the app and the
 // latest data so it opens away from wifi, and shows notifications.
-const SHELL = 'split-it-shell-v3', DATA = 'split-it-data-v3';
+const SHELL = 'split-it-shell-v4', DATA = 'split-it-data-v3';
 const PRECACHE = ['/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/shim.js'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(PRECACHE).catch(() => {}))); self.skipWaiting(); });
 self.addEventListener('activate', e => e.waitUntil((async () => {
