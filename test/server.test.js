@@ -427,3 +427,52 @@ test('an assistant can do what its person can, and nothing more', async () => {
   assert.ok(!/Internet|Hydro/.test((await tool(catKey, 'list_bills', {})).text));
   assert.ok(!/Hydro/.test((await tool(catKey, 'recent_expenses', {})).text));
 });
+
+test('each person links their own assistants from the app, and only they can disconnect them', async () => {
+  assert.strictEqual((await browser().get('/api/assistants')).status, 401, 'needs a sign-in');
+  let r = await cat.get('/api/assistants');
+  assert.strictEqual(r.status, 200);
+  assert.match(r.data.url, /\/mcp$/);
+  const before = r.data.list.length;
+
+  // a key made in the app works on /mcp and acts as its person
+  r = await cat.post('/api/assistants/key', { name: '  Muse   on my phone ' });
+  assert.strictEqual(r.status, 200);
+  const key = r.data.key;
+  assert.match(key, /^hsk_/);
+  assert.strictEqual((await mcpCall(key, 'tools/list')).status, 200);
+  assert.match((await tool(key, 'get_balances')).text, /Cat/);
+  const list = (await cat.get('/api/assistants')).data.list;
+  assert.strictEqual(list.length, before + 1);
+  const row = list.find(x => x.name === 'Muse on my phone');
+  assert.strictEqual(row.kind, 'key');
+  assert.ok(row.used > 0, 'it shows when it was last used');
+  assert.ok(!JSON.stringify(list).includes(key.slice(4)), 'the list never shows the key itself');
+
+  // an assistant connected by signing in (what Claude does) shows up under its own name
+  const base = `http://127.0.0.1:${PORT}`, form = { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Forwarded-For': '10.200.0.1' };
+  const reg = await (await fetch(base + '/oauth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ client_name: 'Claude', redirect_uris: ['https://claude.ai/api/mcp/auth_callback'] }) })).json();
+  const verifier = crypto.randomBytes(32).toString('base64url'), challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+  const q = { response_type: 'code', client_id: reg.client_id, redirect_uri: 'https://claude.ai/api/mcp/auth_callback', state: 's', code_challenge: challenge, code_challenge_method: 'S256' };
+  const back = await fetch(base + '/oauth/authorize', { method: 'POST', redirect: 'manual', headers: form, body: new URLSearchParams({ ...q, name: 'Ben', password: 'ben-password' }) });
+  const code = new URL(back.headers.get('location')).searchParams.get('code');
+  const tok = await (await fetch(base + '/oauth/token', { method: 'POST', headers: form, body: new URLSearchParams({ grant_type: 'authorization_code', code, code_verifier: verifier, client_id: reg.client_id, redirect_uri: q.redirect_uri }) })).json();
+  assert.strictEqual((await mcpCall(tok.access_token, 'tools/list')).status, 200);
+  const bens = (await ben.get('/api/assistants')).data.list;
+  const claude = bens.find(x => x.name === 'Claude');
+  assert.strictEqual(claude.kind, 'app');
+  assert.ok(!bens.some(x => x.name === 'Muse on my phone'), 'Ben sees only his own');
+
+  // someone else can't disconnect yours
+  assert.strictEqual((await ben.post('/api/assistants/remove', { id: row.id })).data.removed, 0);
+  assert.strictEqual((await mcpCall(key, 'tools/list')).status, 200);
+  // you can
+  assert.strictEqual((await cat.post('/api/assistants/remove', { id: row.id })).data.removed, 1);
+  assert.strictEqual((await mcpCall(key, 'tools/list')).status, 401);
+  // disconnecting Claude ends both its access and its refresh
+  assert.strictEqual((await ben.post('/api/assistants/remove', { id: claude.id })).data.removed, 2);
+  assert.strictEqual((await mcpCall(tok.access_token, 'tools/list')).status, 401);
+  const again = await fetch(base + '/oauth/token', { method: 'POST', headers: form, body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: tok.refresh_token, client_id: reg.client_id }) });
+  assert.strictEqual(again.status, 400);
+  assert.strictEqual((await cat.post('/api/assistants/remove', {})).status, 400);
+});

@@ -226,6 +226,10 @@ When adding an expense, tap "Add a photo" to keep a picture of the receipt with 
 
 Split it has a connector (`mcp.js`) so Meta's Muse, Claude or ChatGPT can check balances and add expenses for you by chat. It needs the https address from step 6. It costs nothing on the laptop: the assistant does the thinking, the laptop just answers.
 
+**The easy way:** everyone opens their profile in Split it and scrolls to **AI assistants**. It shows their own connector link, steps for Claude, every assistant connected as them, and buttons to make a key or disconnect one. Nobody needs the laptop for this.
+
+**Connect Claude:** in Claude, open Settings, then Connectors, tap **Add custom connector**, name it Split it and paste `https://YOUR-ADDRESS/mcp`. Tap Connect, sign in with your Split it name and password, and tap Allow. Then turn it on in a chat's tools menu.
+
 **Connect Muse:** start a chat in Muse and send:
 
 > Add a custom connector called Split it. It's a remote MCP server (streamable HTTP) at https://YOUR-ADDRESS/mcp and it signs in with OAuth.
@@ -234,7 +238,7 @@ Use your real address, for example `https://old-laptop.tail1234.ts.net/mcp`. Mus
 
 Then just ask: "what do I owe?", "who owes me in House?", "show my last 5 expenses", "add groceries 54.20 to House", "add pizza 30 with Alex", "I paid Alex 20", or "undo that" within 10 minutes. It asks you to check before adding anything. It can also split by shares ("hydro 120, Alex pays double") or exact amounts, tell you who should pay whom to settle a group, list the bills coming up, and sum up a month. One-on-one expenses work with people who use the app; for anyone else, use a group. If you turned on a sign-in code, the sign-in page asks for it too. Things it adds show up in the app straight away, and housemates get the usual notifications.
 
-**If Muse asks for an API key or token instead of a sign-in:** on the laptop run
+**If Muse asks for an API key or token instead of a sign-in:** tap **Make a key** under AI assistants in your profile. Or, on the laptop, run
 
 ```
 cd ~/split-it
@@ -243,7 +247,7 @@ node server.js mcp-key Sam
 
 and give Muse the key it prints (it's a "Bearer" token). If there's only a box for the link, use `https://YOUR-ADDRESS/mcp?key=THE-KEY`. Keep the key private: anyone with it can act as you.
 
-**Disconnect:** `node server.js mcp-revoke Sam` signs out every assistant and key for that person. You can also remove the connector in Muse.
+**Disconnect:** tap Disconnect next to it under AI assistants in your profile. On the laptop, `node server.js mcp-revoke Sam` signs out every assistant and key for that person. You can also remove the connector in Muse.
 
 If the sign-in link points at the wrong address, set `PUBLIC_URL=https://YOUR-ADDRESS` in `split-it.env` and restart the app.
 

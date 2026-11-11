@@ -978,6 +978,17 @@ async function handle(req, res) {
     return send(res, 200, { sent: n });
   }
 
+  // ---------- your own AI assistants: the link, keys you make, and disconnecting them (see mcp.js) ----------
+  if (p === '/api/assistants' && req.method === 'GET') return send(res, 200, { url: mcp.address(req), list: mcp.mine(uid) });
+  if (p === '/api/assistants/key' && req.method === 'POST') {
+    const { name } = await readBody(req);
+    try { return send(res, 200, { key: mcp.makeKey(uid, name), url: mcp.address(req) }); } catch (e) { return send(res, 400, { error: e.message }); }
+  }
+  if (p === '/api/assistants/remove' && req.method === 'POST') {
+    const { id } = await readBody(req);
+    if (typeof id !== 'string' || !id) return send(res, 400, { error: 'Pick an assistant.' });
+    return send(res, 200, { ok: true, removed: mcp.removeMine(uid, id) });
+  }
   // ---------- calendar subscription ----------
   if (p === '/api/calendar' && req.method === 'POST') {
     if (!me.calToken) { me.calToken = crypto.randomBytes(24).toString('base64url'); saveUsers(); }

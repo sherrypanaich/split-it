@@ -1443,11 +1443,12 @@ function openProfile(){
     <label class="toggle"${LAPTOP?'':' hidden'}><input type="checkbox" id="autoR" ${p.autoRemind===false?'':'checked'}><span><b>Remind people who owe me</b><small>On the 1st and 15th, anyone who owes you $5 or more gets a friendly nudge on their phone.</small></span></label>
     <label class="f">Look</label><div class="seg" id="themeSeg">${[['auto','Match phone'],['light','Light'],['dark','Dark']].map(([k,l])=>`<button data-theme-pick="${k}" aria-pressed="${getTheme()===k}">${l}</button>`).join('')}</div>
     ${LAPTOP?'<label class="f">Signing in</label><div id="acctBox"><span class="mut">Loading…</span></div>':''}
+    ${LAPTOP?'<label class="f">AI assistants</label><div id="aiBox"><span class="mut">Loading…</span></div>':''}
     ${LAPTOP&&isOwner?'<label class="f">Running Split it</label><button class="btn block" id="adminBtn">People, backups and health</button><p class="note">Only you see this, as the owner.</p>':''}
     <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn primary" id="sv">Save</button></div>`, sh => {
     const ab = sh.querySelector('#adminBtn'); if(ab) ab.onclick = () => openAdmin();
     sh.querySelectorAll('[data-col]').forEach(b => b.onclick = () => { color = Number(b.dataset.col); sh.querySelectorAll('[data-col]').forEach(x=>x.setAttribute('aria-pressed', x===b)); });
-    drawPushBox(sh.querySelector('#pushBox')); drawAccount(sh.querySelector('#acctBox'));
+    drawPushBox(sh.querySelector('#pushBox')); drawAccount(sh.querySelector('#acctBox')); drawAssistants(sh.querySelector('#aiBox'));
     sh.querySelectorAll('[data-theme-pick]').forEach(b => b.onclick = () => { const t = b.dataset.themePick; try{ localStorage.setItem(THEME_KEY, t); }catch(e){}
       applyTheme(t); sh.querySelectorAll('[data-theme-pick]').forEach(x=>x.setAttribute('aria-pressed', x===b)); });
     sh.querySelectorAll('[data-char]').forEach(b => b.onclick = () => { char = b.dataset.char; sh.querySelectorAll('[data-char]').forEach(x=>x.setAttribute('aria-pressed', x===b)); });
@@ -1518,6 +1519,46 @@ async function drawAccount(box){
   };
   box.querySelector('#acOut').onclick = async e => { if(!confirmTap(e.currentTarget, 'Tap again to sign out everywhere')) return;
     try{ await api('/api/account/signout-all', {}); location.href = '/login'; }catch(x){ toast(x.message); } };
+}
+/* ================= your AI assistants: connect Claude, Muse or ChatGPT to your own account ================= */
+const copyIt = async (text, ok) => { try{ await navigator.clipboard.writeText(text); toast(ok); }catch(e){ toast('Couldn’t copy. Select it and copy it'); } };
+async function drawAssistants(box){
+  if(!box) return;
+  let a; try{ a = await api('/api/assistants'); }catch(e){ box.innerHTML = `<p class="note">Couldn’t load your assistants.</p>`; return; }
+  const row = x => `<div class="row"><div class="body"><div class="t ell">${esc(x.name)}</div><div class="m" style="white-space:normal">${x.kind==='key'?'Key made':'Connected'} ${ago(x.since)} · ${x.used?'last used '+ago(x.used):'not used yet'}</div></div><button class="btn sm" data-ai-off="${esc(x.id)}">Disconnect</button></div>`;
+  box.innerHTML = `<p class="note" style="margin-top:0">Ask Claude, Muse or ChatGPT “what do I owe?” or “add $54 groceries to House”. Add Split it to your assistant as a connector with your link. It signs in as you, so it sees only what you see here and adds things as you.</p>
+    <div class="cbox"><label for="aiUrl" class="sr">Connector link</label><input class="in" id="aiUrl" readonly value="${esc(a.url)}"><button class="btn" id="aiCopy">Copy</button></div>
+    <details class="note" style="margin:10px 0 0"><summary style="cursor:pointer;font-weight:600">How to add it to Claude</summary>
+      <ol style="margin:6px 0 0;padding-left:20px"><li>In Claude, open Settings, then Connectors, and tap Add custom connector.</li><li>Name it Split it and paste your link.</li><li>Tap Connect. Split it opens: sign in with your own name and password and tap Allow.</li><li>In a chat, turn Split it on in the tools menu.</li></ol>
+      <p style="margin:6px 0 0">Muse and ChatGPT work the same way. If your assistant asks for an API key or token instead, make a key below.</p></details>
+    ${a.list.length ? `<div class="card" style="margin-top:10px">${a.list.map(row).join('')}</div>` : `<p class="note">No assistants connected yet.</p>`}
+    <div id="aiForm"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn" id="aiKey">Make a key</button>${a.list.length>1?'<button class="btn" id="aiAll">Disconnect all</button>':''}</div>`;
+  box.querySelector('#aiCopy').onclick = () => copyIt(a.url, 'Link copied');
+  box.querySelectorAll('[data-ai-off]').forEach(b => b.onclick = async () => { if(!confirmTap(b, 'Tap again')) return;
+    try{ await api('/api/assistants/remove', { id: b.dataset.aiOff }); toast('Disconnected'); drawAssistants(box); }catch(e){ toast(e.message); } });
+  const all = box.querySelector('#aiAll'); if(all) all.onclick = async () => { if(!confirmTap(all, 'Tap again to disconnect all')) return;
+    try{ await api('/api/assistants/remove', { id: 'all' }); toast('All assistants disconnected'); drawAssistants(box); }catch(e){ toast(e.message); } };
+  const form = box.querySelector('#aiForm');
+  box.querySelector('#aiKey').onclick = () => {
+    form.innerHTML = `<div class="card" style="padding:12px 14px;margin-top:10px"><label class="f" for="aiName" style="margin-top:0">What it’s for</label><input class="in" id="aiName" maxlength="40" placeholder="Muse on my phone">
+      <p class="note">A key works like your password for one assistant. You see it once. Disconnect it here any time.</p><p class="note" id="aiErr" role="alert"></p>
+      <div class="foot" style="position:static;padding:10px 0 0"><button class="btn" id="aiNo">Cancel</button><button class="btn primary" id="aiGo">Make key</button></div></div>`;
+    form.querySelector('#aiName').focus();
+    form.querySelector('#aiNo').onclick = () => { form.innerHTML = ''; };
+    form.querySelector('#aiGo').onclick = async e => { const b = e.currentTarget; b.disabled = true;
+      try{ const r = await api('/api/assistants/key', { name: form.querySelector('#aiName').value });
+        const withKey = r.url + '?key=' + encodeURIComponent(r.key);
+        form.innerHTML = `<div class="card" style="padding:12px 14px;margin-top:10px"><div class="t" style="font-weight:800">Your key</div>
+          <p class="note" style="margin:6px 0 8px">Copy it now. It won’t be shown again. Paste it where your assistant asks for an API key or bearer token, with the link above as the server address.</p>
+          <div class="cbox"><label for="aiK" class="sr">Key</label><input class="in" id="aiK" readonly value="${esc(r.key)}"><button class="btn" id="aiKc">Copy</button></div>
+          <p class="note">Only if it has no place for a key: <button class="link" id="aiKl" style="padding:0">copy the link with the key in it</button>. Keep that link private.</p>
+          <button class="btn primary block" id="aiDone" style="margin-top:10px">I copied it</button></div>`;
+        form.querySelector('#aiKc').onclick = () => copyIt(r.key, 'Key copied');
+        form.querySelector('#aiKl').onclick = () => copyIt(withKey, 'Link with key copied');
+        form.querySelector('#aiDone').onclick = () => drawAssistants(box);
+      }catch(x){ form.querySelector('#aiErr').textContent = x.message; b.disabled = false; } };
+  };
 }
 // a second tap confirms, so nothing happens by accident (no pop-up dialogs)
 function confirmTap(btn, msg){
@@ -1729,7 +1770,7 @@ function openChore(gid, id){
 const NEWS = { v:'2.2.0', lines:[
   ['Sign-in code', 'Add a second step from an authenticator app. It’s in your profile under Signing in.'],
   ['Two people paid', 'Splitting a bill two of you paid? Tap “Two people paid” on a new expense.'],
-  ['Trips and chores', 'Give a group a trip currency, and swap a chore turn with one tap.'] ] };
+  ['Ask your AI assistant', 'Connect Claude or Muse to your own Split it. It’s in your profile under AI assistants.'] ] };
 const newsSeen = () => { try{ return localStorage.getItem('hs.news'); }catch(e){ return NEWS.v; } };
 function newsCard(){
   if(!LAPTOP) return '';

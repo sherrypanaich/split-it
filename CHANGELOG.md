@@ -11,6 +11,7 @@
 - **Move-out helper.** Moving someone out lists the payments that clear their balance, each with a Record button, then lets you pick who takes over the bills they paid.
 
 ### New
+- Connect your own AI assistant from the app: your profile has a new AI assistants section with your connector link, steps for Claude, a list of the assistants and keys that act as you (with when each was last used), and a Disconnect button for each. Anyone can make their own key for an assistant that asks for one, without the laptop command line.
 - Sign-in code (profile, Signing in). Works with any authenticator app. Eight backup codes, each good once. The owner can turn it off for someone who lost their phone, from the owner's page or with `node server.js code-off NAME`.
 - A second place for backups: set `BACKUP_COPY_DIR` in `split-it.env`. One full zip a day, 14 kept, with a "Copy off the laptop now" button on the owner's page.
 - The owner's page says when a newer Split it is out, with a link to what changed. `UPDATE_CHECK=off` turns that off.
@@ -53,6 +54,8 @@
 - A Splitwise import marked every payment as received. Payments to someone who uses Split it now wait for them to confirm, like any other.
 
 ### Security
+- Assistants and keys are only ever listed and removed by the person they belong to. The list never shows a key itself.
+- Assistants and keys are only ever listed and removed by the person they belong to. The list never shows a key itself.
 - Every expense and payment is checked on the server: whole cents, shares that add up to the total, only people in the group, and logged under the person who added it.
 - A payment only counts once the person who was paid confirms it. Nobody else can mark it received, even by talking to the server directly.
 - With a sign-in code on, a password reset link or an email sign-in link no longer signs you in by itself, and an AI assistant has to give the code to connect.
