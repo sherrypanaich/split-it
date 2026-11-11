@@ -98,6 +98,10 @@ const savePushes = () => save(PUSH_FILE, pushes);
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { flushDb(); dropLock(); process.exit(0); });
 process.on('beforeExit', flushDb);
 
+// Look people up by id without ever landing on a built-in like "constructor" or "__proto__".
+const userOf = id => typeof id === 'string' && Object.hasOwn(users.users, id) ? users.users[id] : undefined;
+const subsOf = id => typeof id === 'string' && Object.hasOwn(pushes.subs, id) && Array.isArray(pushes.subs[id]) ? pushes.subs[id] : [];
+
 // ---------- passwords ----------
 const hashPw = (pw, salt = crypto.randomBytes(16).toString('hex')) =>
   ({ salt, hash: crypto.scryptSync(pw, salt, 64).toString('hex') });
@@ -115,18 +119,18 @@ const findUser = who => {   // by name, or by a checked email
 };
 // Taking someone out: signs them out everywhere, turns off their phones, revokes assistants. Their expenses stay.
 function removeUser(id) {
-  const u = users.users[id]; if (!u) return null;
+  const u = userOf(id); if (!u) return null;
   mcp.revoke(id);
   let n = 0;
   for (const [t, sess] of Object.entries(users.sessions)) if (sess.uid === id) { delete users.sessions[t]; n++; }
   delete users.users[id];
   saveUsers();
-  const subs = (pushes.subs[id] || []).length;
+  const subs = subsOf(id).length;
   delete pushes.subs[id]; savePushes();
   for (const [res, uid] of listeners) if (uid === id) { try { res.end(); } catch {} listeners.delete(res); }
   return { sessions: n, subs };
 }
-const onlyOwner = id => users.users[id]?.owner && Object.values(users.users).filter(x => x.owner).length === 1 && Object.keys(users.users).length > 1;
+const onlyOwner = id => userOf(id)?.owner && Object.values(users.users).filter(x => x.owner).length === 1 && Object.keys(users.users).length > 1;
 
 // ---------- command line ----------
 const ask = (q) => new Promise(res => {
@@ -213,10 +217,10 @@ const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';')
   .map(c => c.trim().split('=')).filter(p => p[0]).map(([k, ...v]) => [k, unesc(v.join('='))]));
 function sessionUid(req) {
   const t = cookies(req).hs, s = t && users.sessions[t];
-  if (!s || s.exp < Date.now() || !users.users[s.uid]) return null;
+  if (!s || s.exp < Date.now() || !userOf(s.uid)) return null;
   return s.uid;
 }
-const pruneSessions = () => { let n = 0; for (const [t, s] of Object.entries(users.sessions)) if (s.exp < Date.now() || !users.users[s.uid]) { delete users.sessions[t]; n++; } if (n) saveUsers(); };
+const pruneSessions = () => { let n = 0; for (const [t, s] of Object.entries(users.sessions)) if (s.exp < Date.now() || !userOf(s.uid)) { delete users.sessions[t]; n++; } if (n) saveUsers(); };
 const secure = req => req.headers['x-forwarded-proto'] === 'https' || req.socket.encrypted;
 const setCookie = (req, res, val, maxAge) => res.setHeader('Set-Cookie',
   `hs=${val}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure(req) ? '; Secure' : ''}`);
@@ -256,9 +260,23 @@ function inEntry(uid, e) {
   return e.addedBy === uid || e.paidBy === uid || e.from === uid || e.to === uid
     || (e.people || []).includes(uid) || Object.prototype.hasOwnProperty.call(e.split || {}, uid);
 }
+// Only the collections the app uses exist. Anything else is neither readable nor writable, so the data
+// folder can't be used as a dumping ground that everyone signed in can read.
+function knownPath(p) {
+  const s = segs(p);
+  switch (s[0]) {
+    case 'people': case 'recurring': case 'chores': return s.length <= 2;
+    case 'house': case 'members': return s.length <= 2;   // the old single-house version, read once to upgrade
+    case 'groups': return s.length <= 2 || (s[2] === 'members' && s.length <= 4);
+    case 'expenses': return s.length <= 2 || (s[2] === 'comments' && s.length <= 4);
+    case 'data': return s[1] === 'users' && s.length >= 3 && s.length <= 6;
+    default: return false;
+  }
+}
 // doc: the document as it is (or was, for a delete). Leave it out to use what is stored now.
 function canRead(uid, p, doc) {
   const s = segs(p);
+  if (!knownPath(p)) return false;
   if (s[0] === 'data') return s[1] === 'users' && s[2] === uid;   // private per person
   if (s[0] === 'groups') {
     if (memberOf(uid, s[1])) return true;
@@ -282,6 +300,7 @@ function canWrite(uid, p, after) {
   if (!canRead(uid, p)) return false;
   if (after !== undefined && !canRead(uid, p, after)) return false;
   if (s[0] === 'people' && s.length === 2) return s[1] === uid;   // only your own profile
+  if (s[0] === 'house' || s[0] === 'members') return isOwner(uid);   // only the owner upgrades the old house
   return true;
 }
 
@@ -301,7 +320,7 @@ function entryProblem(uid, p, before, after, alsoNew = new Set()) {   // -> what
     : before.paidBy !== after.paidBy || !sameJson(before.split, after.split));
   if (!changed) return null;
   const gid = after.groupId || null;
-  const known = id => typeof id === 'string' && !!id && (gid ? db.docs[`groups/${gid}/members/${id}`] != null || alsoNew.has(`groups/${gid}/members/${id}`) : !!users.users[id]);
+  const known = id => typeof id === 'string' && !!id && (gid ? db.docs[`groups/${gid}/members/${id}`] != null || alsoNew.has(`groups/${gid}/members/${id}`) : !!userOf(id));
   const was = new Set(fresh ? [] : [before.paidBy, before.from, before.to, ...Object.keys(before.split || {})]);
   const who = id => known(id) || was.has(id);   // someone already on the entry may stay, even if they have since left
   if (!Number.isSafeInteger(after.amount) || Math.abs(after.amount) > 1e11) return 'The amount has to be a whole number of cents.';
@@ -312,7 +331,7 @@ function entryProblem(uid, p, before, after, alsoNew = new Set()) {   // -> what
     if (after.from === after.to) return 'A payment goes from one person to another.';
     // Only the person who was paid can say the money arrived. Someone without an account can't confirm, so theirs counts right away.
     const nowCounts = after.confirmed !== false && (fresh || before.confirmed === false || before.amount < after.amount);
-    if (nowCounts && users.users[after.to] && after.to !== uid) return `Only ${nameFor(after.to)} can confirm they got this payment.`;
+    if (nowCounts && userOf(after.to) && after.to !== uid) return `Only ${nameFor(after.to)} can confirm they got this payment.`;
     return null;
   }
   if (after.status === 'needs_amount' && !after.amount && !Object.keys(after.split || {}).length) return who(after.paidBy) ? null : 'The person who pays has to be in the group.';
@@ -327,6 +346,134 @@ function entryProblem(uid, p, before, after, alsoNew = new Set()) {   // -> what
   }
   if (sum !== after.amount) return 'The shares don’t add up to the total.';
   return null;
+}
+
+// ---------- group rules ----------
+// The person who made a group runs it: only they rename it, delete it, hand it over, or take someone else out.
+// Anyone can take themselves out, and whoever added a name-only guest can take that guest out again.
+function groupProblem(uid, p, before, after) {   // -> what's wrong in plain words, or null
+  const s = segs(p);
+  if (s[0] !== 'groups' || !before) return null;
+  const boss = (s.length === 2 ? before : db.docs['groups/' + s[1]])?.createdBy;
+  if (s.length === 2 && after && after.createdBy !== before.createdBy && (!boss || boss === uid)) {
+    const to = after.createdBy, m = typeof to === 'string' ? db.docs[`groups/${s[1]}/members/${to}`] : null;
+    if (!userOf(to) || !m || m.active === false) return 'A group can only be handed to someone in it who has an account.';
+  }
+  if (!boss || boss === uid) return null;
+  const who = nameFor(boss);
+  if (s.length === 2) {
+    if (after == null) return `Only ${who}, who made this group, can delete it.`;
+    if (after.createdBy !== before.createdBy) return `Only ${who}, who made this group, can hand it over.`;
+    if ((after.name ?? null) !== (before.name ?? null)) return `Only ${who}, who made this group, can rename it.`;
+    return null;
+  }
+  if (s.length === 4) {
+    const out = after == null || (before.active !== false && after.active === false);
+    if (out && s[3] !== uid && !(before.kind === 'guest' && before.addedBy === uid)) return `Only ${who}, who made this group, can take someone else out of it.`;
+  }
+  return null;
+}
+
+// ---------- limits on what one person can store ----------
+const MAX_DOC_BYTES = 256 * 1024;
+const MAX_DOCS = +process.env.MAX_DOCS_PER_PERSON || 20000;   // per person, per collection
+const parentOf = p => segs(p).slice(0, -1).join('/');
+const docOwner = (p, d) => { const s = segs(p); if (s[0] === 'data') return s[2]; if (s[0] === 'people') return s[1];
+  return d && (d.addedBy || d.createdBy || d.by) || null; };
+function docCount(uid, parent) {   // documents in a collection that count against this person (theirs, or nobody's)
+  let n = 0; const prefix = parent + '/';
+  for (const [k, d] of Object.entries(db.docs)) if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/') && d != null) { const o = docOwner(k, d); if (o === uid || o == null) n++; }
+  return n;
+}
+
+// ---------- who changed what: versions and a short log on every expense and payment ----------
+// Written here, on every save, so no phone can skip it or fake it. Each entry carries a version number `v`;
+// a save made from an older version than someone else's change is refused with 409, { code: 'stale' }.
+const LOG_FIELDS = ['amount', 'title', 'split', 'date', 'paidBy', 'from', 'to', 'category', 'note'];
+const LOG_KEEP = 20;
+const STALE = 'This changed since you opened it. Have a look again.';
+const clip = v => typeof v === 'string' && v.length > 200 ? v.slice(0, 200) + '…' : v;
+function changeOf(uid, before, after, now) {   // -> the log line for this save, or null when nothing worth logging changed
+  const fresh = before == null, diff = {};
+  if (!fresh) for (const f of LOG_FIELDS) if (JSON.stringify(before[f] ?? null) !== JSON.stringify(after[f] ?? null)) diff[f] = [clip(before[f] ?? null), clip(after[f] ?? null)];
+  const what = fresh ? 'added' : !before.deletedAt && after.deletedAt ? 'removed' : before.deletedAt && !after.deletedAt ? 'restored'
+    : Object.keys(diff).length ? 'edited' : before.confirmed === false && after.confirmed !== false ? 'confirmed' : null;
+  if (!what) return null;
+  const line = { v: (fresh ? 0 : before.v || 0) + 1, at: now, by: uid, what };
+  if (Object.keys(diff).length) line.diff = diff;
+  return line;
+}
+function staleFor(uid, before, baseV) {   // was this entry changed by someone else after version baseV?
+  const v = before.v || 0;
+  if (baseV >= v) return false;
+  const later = (before.changes || []).filter(c => c.v > baseV);
+  if (later.length < v - baseV) return true;   // older than the log reaches: can't tell, so look again
+  return later.some(c => c.by !== uid);
+}
+
+// ---------- every change from a phone comes through here ----------
+// All or nothing: each change is checked (who may, the money, the group rules, versions, size) before any is saved.
+// An expense or payment is never deleted outright: a delete moves it to the bin (Recently deleted), where anyone
+// in it can see who removed it and put it back.
+function writeOps(uid, ops) {   // -> { status, body }
+  const no = (status, error, extra) => ({ status, body: { error, ...(extra || {}) } });
+  const sp = typeof storageProblem === 'function' ? storageProblem() : null;   // the laptop's disk is full (storage section)
+  if (sp) return no(507, sp);
+  if (!Array.isArray(ops) || !ops.length || ops.length > 100) return no(400, 'bad ops');
+  const now = Date.now(), plan = [], staged = {}, counted = new Map();
+  const cur = p => Object.hasOwn(staged, p) ? staged[p] : db.docs[p];
+  const alsoNew = new Set(ops.filter(x => x && x.op === 'set').map(x => x.path));
+  for (const o of ops) {
+    if (!o || !['set', 'update', 'delete'].includes(o.op)) return no(400, 'bad ops');
+    if (!validPath(o.path) || segs(o.path).length % 2) return no(400, 'bad path');
+    if (o.op !== 'delete' && (typeof o.data !== 'object' || !o.data || Array.isArray(o.data))) return no(400, 'bad data');
+    const s = segs(o.path), entry = s[0] === 'expenses' && s.length === 2, before = cur(o.path), stored = db.docs[o.path];
+    if (o.op === 'update' && before == null) return no(404, 'not found: ' + o.path);
+    let data = o.data, baseV = null;
+    if (entry && data) { const { v, changes, ...rest } = data; data = rest; if (Number.isSafeInteger(v) && v >= 0) baseV = v; }
+    let after;
+    if (o.op === 'set') after = data;
+    else if (o.op === 'update') after = { ...before, ...data };
+    else if (entry) { if (!canWrite(uid, o.path)) return no(403, 'not allowed'); if (before == null || before.deletedAt) continue; after = { ...before, deletedAt: now, deletedBy: uid }; }
+    if (!canWrite(uid, o.path, after)) return no(403, 'not allowed');
+    const wrong = entryProblem(uid, o.path, stored, after, alsoNew);
+    if (wrong) return no(422, wrong);
+    const rule = groupProblem(uid, o.path, before, after);
+    if (rule) return no(403, rule);
+    if (entry && baseV != null && before && staleFor(uid, before, baseV)) return no(409, STALE, { code: 'stale' });
+    if (entry && after) {
+      if (!before?.deletedAt && after.deletedAt) after.deletedBy = uid;   // the bin always names who really removed it
+      if (before?.deletedAt && !after.deletedAt) after.deletedBy = null;
+      const line = changeOf(uid, before, after, now);
+      if (line?.what === 'edited') { after.editedAt = now; after.editedBy = uid; }
+      const changes = line ? [...(before?.changes || []), line].slice(-LOG_KEEP) : before?.changes;
+      after = { ...after, v: line ? line.v : before?.v || 0, ...(changes ? { changes } : {}) };
+      if (!changes) delete after.changes;
+    }
+    if (after != null && Buffer.byteLength(JSON.stringify(after)) > MAX_DOC_BYTES) return no(413, 'That’s too big to save. Try a shorter note or fewer items.');
+    if (before == null && after != null) {
+      const parent = parentOf(o.path), n = counted.has(parent) ? counted.get(parent) : docCount(uid, parent);
+      if (n >= MAX_DOCS) return no(429, 'That’s more than one person can keep here. Tidy up some old ones first.');
+      counted.set(parent, n + 1);
+    }
+    staged[o.path] = after ?? null;
+    plan.push({ op: entry && o.op === 'delete' ? 'update' : o.op, path: o.path, after });
+  }
+  if (!plan.length) return { status: 200, body: { ok: true } };
+  const before = {};
+  for (const x of plan) if (!Object.hasOwn(before, x.path)) before[x.path] = db.docs[x.path];
+  for (const x of plan) { if (x.after == null) delete db.docs[x.path]; else db.docs[x.path] = x.after; }
+  const paths = [...new Set(plan.map(x => x.path))];
+  const saved = typeof commitDb === 'function' ? commitDb(paths) : (saveDb(), true);   // commitDb: storage section
+  if (!saved) {
+    for (const [p, d] of Object.entries(before)) { if (d === undefined) delete db.docs[p]; else db.docs[p] = d; }
+    return no(507, (typeof storageProblem === 'function' && storageProblem()) || 'Couldn’t save to the laptop’s disk.');
+  }
+  broadcast(paths, null, before);
+  tellPeople(uid, plan, before).catch(e => console.error(e));
+  if (paths.some(p => segs(p)[0] === 'recurring')) setImmediate(() => { try { postDueBills(); } catch (e) { console.error(e); } });   // a new bill due today shows up now
+  const versions = {}; for (const p of paths) if (db.docs[p]?.v != null && segs(p)[0] === 'expenses') versions[p] = db.docs[p].v;
+  return { status: 200, body: { ok: true, versions } };
 }
 
 // ---------- live updates ----------
@@ -459,7 +606,7 @@ function restoreZip(buf) {
   db = next; dbDirty = true; flushDb();
   // Sessions are not restored: the ones signed out since the backup stay signed out, and current ones keep working if that person is still there.
   if (nextUsers) { const now = users.sessions || {}; users = nextUsers; users.sessions = {};
-    for (const [t, s] of Object.entries(now)) if (users.users[s.uid]) users.sessions[t] = s;
+    for (const [t, s] of Object.entries(now)) if (userOf(s.uid)) users.sessions[t] = s;
     saveUsers(); }
   if (files['push-keys.json']) { try { const k = JSON.parse(files['push-keys.json'].toString('utf8')); if (k.publicKey && k.privateJwk) { fs.writeFileSync(PUSH_KEYS_FILE, files['push-keys.json']); pushKeys = push.loadKeys(PUSH_KEYS_FILE); } } catch {} }
   if (files['push.json']) { try { pushes = JSON.parse(files['push.json'].toString('utf8')); savePushes(); } catch {} }
@@ -495,11 +642,11 @@ let pushKeys = push.loadKeys(PUSH_KEYS_FILE);
 const nudges = new Map();
 const money = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' });
 const cad = cents => money.format((cents || 0) / 100);
-const nameFor = id => db.docs['people/' + id]?.nickname || users.users[id]?.name || 'Someone';
+const nameFor = id => db.docs['people/' + id]?.nickname || userOf(id)?.name || (users.former && Object.hasOwn(users.former, String(id)) ? 'Former member' : 'Someone');
 async function notify(uids, message) {
   let sent = 0, changed = false;
   for (const id of new Set(uids)) {
-    for (const sub of [...(pushes.subs[id] || [])]) {
+    for (const sub of [...subsOf(id)]) {
       const r = await push.sendOne(pushKeys, sub, { url: '/', ...message }, PUSH_CONTACT);
       if (r === 'ok') sent++;
       if (r === 'gone') { pushes.subs[id] = pushes.subs[id].filter(s => s !== sub); changed = true; }
@@ -509,7 +656,7 @@ async function notify(uids, message) {
   return sent;
 }
 const activeMembers = gid => { const prefix = `groups/${gid}/members/`;
-  return Object.entries(db.docs).filter(([mk, m]) => mk.startsWith(prefix) && m && m.active !== false).map(([mk]) => mk.slice(prefix.length)).filter(id => users.users[id]); };
+  return Object.entries(db.docs).filter(([mk, m]) => mk.startsWith(prefix) && m && m.active !== false).map(([mk]) => mk.slice(prefix.length)).filter(id => userOf(id)); };
 // Tell housemates about things that involve them: new expenses, payments to confirm, comments,
 // a variable bill that got its amount, an expense whose amount or split changed, and budgets being used up.
 async function tellPeople(uid, ops, before) {
@@ -519,12 +666,21 @@ async function tellPeople(uid, ops, before) {
     if (s[0] === 'chores' && s.length === 2 && d && prev && d.swap && d.swap.at !== prev.swap?.at && Array.isArray(d.order) && d.order.length) {
       const who = d.order[(d.turn || 0) % d.order.length];
       const what = d.title || 'A chore', other = d.swap.from;
-      if (who && who !== uid && users.users[who]) await notify([who], { title: `${nameFor(uid)} swapped a chore with you`, body: `${what} is yours this time${d.due ? ', due ' + d.due : ''}. ${nameFor(other)} takes your turn instead.`, tag: 'chore-' + s[1] });
-      else if (other && other !== uid && users.users[other]) await notify([other], { title: `${nameFor(uid)} took your turn`, body: `${what} is theirs this time. You take their turn instead.`, tag: 'chore-' + s[1] });
+      if (who && who !== uid && userOf(who)) await notify([who], { title: `${nameFor(uid)} swapped a chore with you`, body: `${what} is yours this time${d.due ? ', due ' + d.due : ''}. ${nameFor(other)} takes your turn instead.`, tag: 'chore-' + s[1] });
+      else if (other && other !== uid && userOf(other)) await notify([other], { title: `${nameFor(uid)} took your turn`, body: `${what} is theirs this time. You take their turn instead.`, tag: 'chore-' + s[1] });
       continue;
     }
     if (s[0] !== 'expenses' || !d) continue;
     const fresh = o.op === 'set' && prev == null;
+    // moved to the bin: everyone in it hears who removed what, so a debt can't quietly disappear
+    if (s.length === 2 && prev && !prev.deletedAt && d.deletedAt) {
+      const g = d.groupId ? db.docs['groups/' + d.groupId] : null, where = g?.name ? ` in ${g.name}` : '';
+      const told = [...new Set([...(d.people || []), d.paidBy, d.from, d.to, d.addedBy])].filter(x => x && x !== uid && userOf(x));
+      const what = d.kind === 'payment' ? `the ${cad(d.amount)} payment from ${nameFor(d.from)} to ${nameFor(d.to)}` : `${d.title || 'an expense'} (${cad(d.amount)})`;
+      await notify(told, { title: `${nameFor(uid)} removed ${d.kind === 'payment' ? 'a payment' : d.title || 'an expense'}`,
+        body: `${what[0].toUpperCase() + what.slice(1)}${where}. It no longer counts. Find it in Recently deleted to put it back.`, tag: 'del-' + s[1] });
+      continue;
+    }
     if (fresh && s.length === 2 && d.kind === 'payment' && d.confirmed === false && d.to && d.to !== uid) {
       await notify([d.to], { title: `${nameFor(d.from)} says they paid you ${cad(d.amount)}`, body: 'Open Split it to confirm you got it.', tag: 'pay-' + s[1] });
     } else if (fresh && s.length === 2 && d.kind === 'expense' && !d.recurringId && !d.deletedAt) {
@@ -700,7 +856,7 @@ async function choreReminders(today) {
     const s = segs(k);
     if (s[0] !== 'chores' || s.length !== 2 || !c || c.due !== today || !Array.isArray(c.order) || !c.order.length) continue;
     const who = c.order[(c.turn || 0) % c.order.length];
-    if (!users.users[who]) continue;
+    if (!userOf(who)) continue;
     const g = db.docs['groups/' + c.groupId];
     await notify([who], { title: `Your turn: ${c.title || 'a chore'}`, body: `Due today${g?.name ? ' for ' + g.name : ''}. Tap Done in Split it when it’s finished.`, tag: 'chore-' + s[1] });
   }
@@ -760,7 +916,7 @@ async function monthlySummaries(now) {
   const monthName = last.toLocaleDateString('en-CA', { month: 'long' });
   const list = sharedEntries(), net = netOf(list);
   for (const uid of Object.keys(pushes.subs)) {
-    if (!users.users[uid] || !pushes.subs[uid].length) continue;
+    if (!userOf(uid) || !pushes.subs[uid].length) continue;
     const share = list.filter(e => e.kind !== 'payment' && (e.date || '').startsWith(ym)).reduce((t, e) => t + ((e.split || {})[uid] || 0), 0);
     const v = net[uid] || 0;
     if (!share && !v) continue;
@@ -776,7 +932,7 @@ async function owedReminders() {
   for (const e of sharedEntries()) if (e.kind === 'payment' && e.confirmed === false) pending[e.from + '|' + e.to] = (pending[e.from + '|' + e.to] || 0) + e.amount;
   for (const [k, owed] of Object.entries(allDebts())) {
     const [from, to] = k.split('|'), amt = owed - (pending[k] || 0);
-    if (amt < 500 || !users.users[from] || !users.users[to] || db.docs['people/' + to]?.autoRemind === false) continue;
+    if (amt < 500 || !userOf(from) || !userOf(to) || db.docs['people/' + to]?.autoRemind === false) continue;
     (per[from] = per[from] || []).push({ to, amt });
   }
   for (const [from, list] of Object.entries(per)) {
@@ -785,6 +941,46 @@ async function owedReminders() {
     const body = 'You owe ' + (parts.length > 1 ? parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1] : parts[0]) + '. Settle up in Split it when you can.';
     await notify([from], { title: 'Friendly reminder', body, tag: 'owed' });
   }
+}
+
+// ---------- download my data, delete my data ----------
+// What one person put in or shares: their profile, private one-on-ones, groups and the entries they are in.
+function myData(uid) {
+  const u = userOf(uid) || {}, docs = {};
+  const mine = (k, d) => { const s = segs(k);
+    if (s[0] === 'data') return s[2] === uid;
+    if (s[0] === 'people') return s[1] === uid;
+    if (s[0] === 'groups') return memberOf(uid, s[1]);
+    if (s[0] === 'expenses') return s.length === 2 ? inEntry(uid, d) && (!d.groupId || (d.people || []).includes(uid) || d.addedBy === uid) : d?.by === uid;
+    if (s[0] === 'recurring' || s[0] === 'chores') return !!d?.groupId && memberOf(uid, d.groupId);
+    return false; };
+  for (const [k, d] of Object.entries(db.docs)) if (d != null && mine(k, d)) docs[k] = d;
+  return { app: 'Split it', version: VERSION, exportedAt: new Date().toISOString(),
+    account: { id: uid, name: u.name, email: u.email || null, emailChecked: !!u.emailVerified, owner: !!u.owner, createdAt: u.createdAt || null, lastSeen: u.lastSeen || null, google: !!u.google },
+    docs };
+}
+// Delete someone's own data. Their profile and private data go. Entries they share with others stay, so nobody's balance
+// changes, and show them as "Former member". Groups they made pass to someone still in them.
+function forgetPerson(uid) {
+  let removed = 0, kept = 0; const changed = [], before = {};
+  const put = (k, d) => { if (!Object.hasOwn(before, k)) before[k] = db.docs[k]; if (d == null) delete db.docs[k]; else db.docs[k] = d; changed.push(k); };
+  for (const [k, d] of Object.entries(db.docs)) {
+    const s = segs(k);
+    if ((s[0] === 'data' && s[2] === uid) || (s[0] === 'people' && s[1] === uid)) { put(k, null); removed++; continue; }
+    if (s[0] === 'groups' && s.length === 4 && s[3] === uid && d) put(k, { kind: 'guest', name: 'Former member', color: d.color || 0, active: false, leftAt: d.leftAt || Date.now(), joinedAt: d.joinedAt || null });
+    if (s[0] === 'groups' && s.length === 2 && d?.createdBy === uid) {
+      const next = activeMembers(s[1]).find(x => x !== uid);
+      put(k, { ...d, createdBy: next || null });
+    }
+    if (s[0] === 'expenses' && s.length === 2 && d && !d.groupId) {
+      const others = [...new Set([...(d.people || []), d.paidBy, d.from, d.to])].filter(x => x && x !== uid);
+      if (others.length) kept++; else { put(k, null); removed++; }
+    } else if (s[0] === 'expenses' && s.length === 2 && d && inEntry(uid, d) && (d.people || []).includes(uid)) kept++;
+  }
+  users.former = users.former || {}; users.former[uid] = Date.now();
+  removeUser(uid);
+  dbDirty = true; flushDb(); broadcast(changed, null, before);   // on disk right away, not a moment later
+  return { removed, kept };
 }
 
 // ---------- calendar feed (.ics): bills and chores for the phone's calendar app ----------
@@ -868,7 +1064,7 @@ function file(res, name, type, cache) {
 const PUBLIC_FILES = new Set(['/manifest.webmanifest', '/sw.js', '/icon.svg', '/icon-192.png', '/icon-512.png', '/icon-maskable-512.png', '/apple-touch-icon.png', '/offline.html']);
 const photoCount = new Map();   // uid|day -> uploads today
 
-const isOwner = uid => !!users.users[uid]?.owner;
+const isOwner = uid => !!userOf(uid)?.owner;
 async function handle(req, res) {
   // Laptop commands (node server.js set-password NAME ...) reach the running app here. Only from this computer,
   // never through a tunnel or proxy, and only with the secret from data/server.lock.
@@ -922,7 +1118,7 @@ async function handle(req, res) {
     if (p.startsWith('/api/')) return send(res, 401, { error: 'signed out' });
     res.writeHead(302, { Location: '/login' }); return res.end();
   }
-  const me = users.users[uid];
+  const me = userOf(uid);
   if (!me.lastSeen || Date.now() - me.lastSeen > 3600e3) { me.lastSeen = Date.now(); saveUsers(); }
 
   if (p === '/' || p === '/index.html') return file(res, 'index.html', null, 'private, no-cache');
@@ -970,11 +1166,16 @@ async function handle(req, res) {
   }
   if (p === '/api/push/nudge' && req.method === 'POST') {
     const { to, amount } = await readBody(req);
-    if (!users.users[to] || to === uid || !(amount > 0)) return send(res, 400, { error: 'bad nudge' });
+    if (!userOf(to) || to === uid || !(amount > 0)) return send(res, 400, { error: 'bad nudge' });
+    // only for money they really owe you, and never for more than that (a payment waiting to be confirmed counts as paid)
+    let owed = allDebts()[to + '|' + uid] || 0;
+    for (const e of sharedEntries()) if (e.kind === 'payment' && e.confirmed === false && e.from === to && e.to === uid) owed -= e.amount;
+    if (owed <= 0) return send(res, 400, { error: `${nameFor(to)} doesn’t owe you anything right now.` });
+    const ask = Math.min(Math.round(amount), owed);
     const k = uid + '>' + to, last = nudges.get(k) || 0;
     if (Date.now() - last < 6 * 3600e3) return send(res, 429, { error: 'You already sent a reminder recently.' });
     nudges.set(k, Date.now());
-    const n = await notify([to], { title: `${nameFor(uid)} sent a reminder`, body: `You owe ${nameFor(uid)} ${cad(amount)} on Split it.`, tag: 'nudge-' + uid });
+    const n = await notify([to], { title: `${nameFor(uid)} sent a reminder`, body: `You owe ${nameFor(uid)} ${cad(ask)} on Split it.`, tag: 'nudge-' + uid });
     return send(res, 200, { sent: n });
   }
 
@@ -991,7 +1192,8 @@ async function handle(req, res) {
   }
   // ---------- calendar subscription ----------
   if (p === '/api/calendar' && req.method === 'POST') {
-    if (!me.calToken) { me.calToken = crypto.randomBytes(24).toString('base64url'); saveUsers(); }
+    const { fresh } = await readBody(req).catch(() => ({}));   // fresh: make a new link, and the old one stops working
+    if (!me.calToken || fresh) { me.calToken = crypto.randomBytes(24).toString('base64url'); saveUsers(); }
     return send(res, 200, { url: `${accounts.base(req)}/cal/${me.calToken}.ics` });
   }
   if (p === '/api/calendar.ics') return out(res, 200, { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': 'attachment; filename="split-it.ics"', 'Cache-Control': 'no-store' }, icsFor(uid));
@@ -1001,7 +1203,7 @@ async function handle(req, res) {
     if (!isOwner(uid)) return send(res, 403, { error: 'Only the owner can do that.' });
     if (p === '/api/admin/overview') {
       flushDb();
-      const pushOn = id => (pushes.subs[id] || []).length;
+      const pushOn = id => subsOf(id).length;
       const sessions = {}; for (const s of Object.values(users.sessions)) if (s.exp > Date.now()) sessions[s.uid] = (sessions[s.uid] || 0) + 1;
       const people = Object.entries(users.users).map(([id, u]) => ({ id, name: u.name, nickname: db.docs['people/' + id]?.nickname || null, owner: !!u.owner, email: u.emailVerified ? u.email : null,
         hasPassword: !!u.hash, google: !!u.google, code: accounts.needsCode(id), createdAt: u.createdAt || null, lastSeen: u.lastSeen || null, push: pushOn(id), sessions: sessions[id] || 0, mcp: mcp.connected(id) }));
@@ -1013,24 +1215,24 @@ async function handle(req, res) {
           photos, photoBytes, disk, lastBillRun, lastBackupAt, remindHour: REMIND_HOUR, copyDir: BACKUP_COPY_DIR, copyAt: copyState.at, copyError: copyState.error, publicUrl: process.env.PUBLIC_URL || null, email: !!process.env.RESEND_API_KEY, google: !!process.env.GOOGLE_CLIENT_ID, listeners: listeners.size, dataDir: DATA_DIR } });
     }
     if (p === '/api/admin/reset-link' && req.method === 'POST') {
-      const { id } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
-      return send(res, 200, { url: accounts.resetLink(req, id), name: users.users[id].name });
+      const { id } = await readBody(req); if (!userOf(id)) return send(res, 404, { error: 'No such person.' });
+      return send(res, 200, { url: accounts.resetLink(req, id), name: userOf(id).name });
     }
     if (p === '/api/admin/remove' && req.method === 'POST') {
-      const { id } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
+      const { id } = await readBody(req); if (!userOf(id)) return send(res, 404, { error: 'No such person.' });
       if (id === uid) return send(res, 400, { error: 'You can’t remove yourself. Make someone else the owner first.' });
       const r = removeUser(id);
       return send(res, 200, { ok: true, ...r });
     }
     if (p === '/api/admin/owner' && req.method === 'POST') {
-      const { id, owner } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
-      if (!owner && users.users[id].owner && Object.values(users.users).filter(x => x.owner).length === 1) return send(res, 400, { error: 'Split it needs at least one owner.' });
+      const { id, owner } = await readBody(req); if (!userOf(id)) return send(res, 404, { error: 'No such person.' });
+      if (!owner && userOf(id).owner && Object.values(users.users).filter(x => x.owner).length === 1) return send(res, 400, { error: 'Split it needs at least one owner.' });
       users.users[id].owner = !!owner; saveUsers();
       return send(res, 200, { ok: true });
     }
     if (p === '/api/admin/rename' && req.method === 'POST') {
       const { id, name } = await readBody(req); const n = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 30);
-      if (!users.users[id] || !n) return send(res, 400, { error: 'Give a name.' });
+      if (!userOf(id) || !n) return send(res, 400, { error: 'Give a name.' });
       const taken = findUser(n); if (taken && taken[0] !== id) return send(res, 400, { error: 'Someone already has that name.' });
       users.users[id].name = n; saveUsers();
       return send(res, 200, { ok: true });
@@ -1040,7 +1242,7 @@ async function handle(req, res) {
       return send(res, 200, { ok: true, sessions: endSessions(id, { assistants: true }) });
     }
     if (p === '/api/admin/code-off' && req.method === 'POST') {   // someone lost the phone with their authenticator app
-      const { id } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
+      const { id } = await readBody(req); if (!userOf(id)) return send(res, 404, { error: 'No such person.' });
       return send(res, 200, { ok: true, was: accounts.codeOff(id) });
     }
     if (p === '/api/admin/copy-now' && req.method === 'POST') {
@@ -1075,10 +1277,28 @@ async function handle(req, res) {
     return send(res, 404, { error: 'not found' });
   }
 
+  // ---------- your own data: take a copy, or delete it ----------
+  if (p === '/api/me/export') {
+    const stamp = new Date().toISOString().slice(0, 10);
+    return out(res, 200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="split-it-my-data-${stamp}.json"`, 'Cache-Control': 'no-store' }, JSON.stringify(myData(uid), null, 2));
+  }
+  if (p === '/api/me/delete' && req.method === 'POST') {
+    const { password, confirm } = await readBody(req);
+    const wait = tooManyTries(req, uid); if (wait) return send(res, 429, { error: wait });
+    if (me.hash ? !checkPw(String(password || ''), me) : String(confirm || '').trim().toLowerCase() !== me.name.toLowerCase()) {
+      noteMiss(req, uid);
+      return send(res, 401, { error: me.hash ? 'That password isn’t right.' : 'Type your sign-in name to confirm.' });
+    }
+    if (onlyOwner(uid)) return send(res, 400, { error: 'You’re the only owner. Make someone else the owner first.' });
+    const r = forgetPerson(uid);
+    setCookie(req, res, '', 0);
+    return send(res, 200, { ok: true, ...r });
+  }
   if (p === '/api/me') return send(res, 200, { uid, name: me.name, isOwner: !!me.owner, version: VERSION });
   if (p === '/api/profiles') {
     const outp = {};
-    for (const id of (url.searchParams.get('ids') || '').split(',')) if (users.users[id]) outp[id] = { name: users.users[id].name };
+    for (const id of (url.searchParams.get('ids') || '').split(',')) if (userOf(id)) outp[id] = { name: userOf(id).name };
+      else if (users.former && Object.hasOwn(users.former, id)) outp[id] = { name: 'Former member', former: true };
     return send(res, 200, outp);
   }
   if (p === '/api/doc') {
@@ -1099,28 +1319,8 @@ async function handle(req, res) {
   }
   if (p === '/api/write' && req.method === 'POST') {
     const { ops } = await readBody(req);
-    if (!Array.isArray(ops) || !ops.length || ops.length > 100) return send(res, 400, { error: 'bad ops' });
-    for (const o of ops) {
-      if (!validPath(o.path) || segs(o.path).length % 2) return send(res, 400, { error: 'bad path' });
-      if (o.op !== 'delete' && (typeof o.data !== 'object' || !o.data || Array.isArray(o.data))) return send(res, 400, { error: 'bad data' });
-      if (o.op === 'update' && db.docs[o.path] == null) return send(res, 404, { error: 'not found: ' + o.path });
-      const after = o.op === 'set' ? o.data : o.op === 'update' ? { ...db.docs[o.path], ...o.data } : undefined;
-      if (!canWrite(uid, o.path, after)) return send(res, 403, { error: 'not allowed' });
-      const wrong = entryProblem(uid, o.path, db.docs[o.path], after, new Set(ops.filter(x => x.op === 'set').map(x => x.path)));
-      if (wrong) return send(res, 422, { error: wrong });
-    }
-    const before = Object.fromEntries(ops.map(o => [o.path, db.docs[o.path]]));
-    for (const o of ops) {
-      if (o.op === 'set') db.docs[o.path] = o.data;
-      else if (o.op === 'update') db.docs[o.path] = { ...db.docs[o.path], ...o.data };
-      else if (o.op === 'delete') delete db.docs[o.path];
-    }
-    saveDb();
-    broadcast(ops.map(o => o.path), null, before);
-    send(res, 200, { ok: true });
-    tellPeople(uid, ops, before).catch(e => console.error(e));
-    if (ops.some(o => segs(o.path)[0] === 'recurring')) setImmediate(() => { try { postDueBills(); } catch (e) { console.error(e); } });   // a new bill due today shows up now
-    return;
+    const r = writeOps(uid, ops);
+    return send(res, r.status, r.body);
   }
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -1137,7 +1337,7 @@ const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it
   setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS });
 
 // AI assistant connector (Muse, Claude...): see mcp.js
-const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, allDebts, sharedEntries, netOf,
+const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, writeOps, allDebts, sharedEntries, netOf,
   nameFor, cad, segs, secure, findUser, tooManyTries, checkLogin, noteMiss, computeSplit, billDate, billNextKey, billFirstKey, simplified, pairwiseOf, version: VERSION,
   needsCode: uid => accounts.needsCode(uid), checkCode: (uid, code) => accounts.checkCode(uid, code) });
 
