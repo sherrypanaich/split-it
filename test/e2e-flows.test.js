@@ -157,7 +157,7 @@ test('a household goes through the app together and every phone agrees', { skip:
     for (const p of [a, b]) { await row(p, 'Pizza').click(); await p.click('#edit'); await p.waitForSelector('#amt'); }
     await a.fill('#amt', '44'); await a.click('#save'); await a.waitForSelector('#amt', { state: 'detached' });
     await b.fill('#ttl', 'Pizza night'); await b.waitForTimeout(500); await b.click('#save');
-    await until(b, /This changed since you opened it/, 'that the expense changed under it');
+    await until(b, /changed this while you had it open/, 'that the expense changed under it');
     await b.waitForSelector('#edit'); await b.waitForFunction(() => !document.querySelector('#amt'));
     assert.match(await sheetText(b), /\$44\.00/, 'and it shows the new version');
     assert.strictEqual(Object.values(await dbNow()).find(e => e && e.title && e.title.startsWith('Pizza')).title, 'Pizza', 'the older save did not overwrite it');

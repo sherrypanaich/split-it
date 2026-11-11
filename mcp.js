@@ -427,7 +427,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         for (const [id, v] of Object.entries(per).filter(([, v]) => v).sort((x, y) => Math.abs(y[1]) - Math.abs(x[1]))) {
           lines.push(v > 0 ? `${nameOf(id)} owes you ${cad(v)}` : `You owe ${nameOf(id)} ${cad(-v)}`); net += v;
         }
-        const data = { currency: HOME, net: dollars(net), netCents: net, people: Object.entries(per).filter(([, v]) => v).map(([id, v]) => ({ name: nameOf(id), owesYou: dollars(v), owesYouCents: v })) };
+        const data = { currency: HOME, net: dollars(net), netCents: net, people: Object.entries(per).filter(([, v]) => v).map(([id, v]) => ({ name: nameOf(id), amount: dollars(v), owesYou: dollars(v), owesYouCents: v })) };
         if (!lines.length) return { text: `${h.nameFor(uid)}, you’re all square with everyone.`, data };
         return { text: `Balances for ${h.nameFor(uid)}:\n- ${lines.join('\n- ')}\nOverall: ${net > 0 ? 'you’re owed ' + cad(net) : net < 0 ? 'you owe ' + cad(-net) : 'all square'}.`, data };
       } },
