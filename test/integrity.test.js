@@ -241,7 +241,7 @@ test('only the group’s creator can rename it, delete it or hand it over', asyn
   const g = await newGroup(ana, [ben]);
   assert.strictEqual((await ben.update('groups/' + g, { name: 'Ben’s house' })).status, 403);
   const r = await ben.update('groups/' + g, { createdBy: ben.uid });
-  assert.strictEqual(r.status, 403); assert.match(r.data.error, /Ana, who made this group/);
+  assert.strictEqual(r.status, 403); assert.match(r.data.error, /Ana, who runs this group/);
   assert.strictEqual((await ben.del('groups/' + g)).status, 403);
   assert.strictEqual((await ben.set('groups/' + g, { name: 'Taken', createdBy: ben.uid })).status, 403);
   assert.strictEqual((await ben.update('groups/' + g, { emoji: 'party', simplify: false })).status, 200, 'everyday settings are for everyone');

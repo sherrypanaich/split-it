@@ -544,14 +544,14 @@ function groupProblem(uid, p, before, after) {   // -> what's wrong in plain wor
   if (!boss || boss === uid) return null;
   const who = nameFor(boss);
   if (s.length === 2) {
-    if (after == null) return `Only ${who}, who made this group, can delete it.`;
-    if (after.createdBy !== before.createdBy) return `Only ${who}, who made this group, can hand it over.`;
-    if ((after.name ?? null) !== (before.name ?? null)) return `Only ${who}, who made this group, can rename it.`;
+    if (after == null) return `Only ${who}, who runs this group, can delete it.`;
+    if (after.createdBy !== before.createdBy) return `Only ${who}, who runs this group, can hand it over.`;
+    if ((after.name ?? null) !== (before.name ?? null)) return `Only ${who}, who runs this group, can rename it.`;
     return null;
   }
   if (s.length === 4) {
     const out = after == null || (before.active !== false && after.active === false);
-    if (out && s[3] !== uid && !(before.kind === 'guest' && before.addedBy === uid)) return `Only ${who}, who made this group, can take someone else out of it.`;
+    if (out && s[3] !== uid && !(before.kind === 'guest' && before.addedBy === uid)) return `Only ${who}, who runs this group, can take someone else out of it.`;
   }
   return null;
 }

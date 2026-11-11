@@ -2478,7 +2478,7 @@ function openGroupEditor(gid){
   openSheet(head(isNew?'New group':'Group settings') + `
     <label class="f">Icon</label><div class="chips">${GROUP_ICONS.map(e=>`<button class="chip iconchip" data-emo="${e}" aria-label="${e}">${icon(e)}</button>`).join('')}</div>
     <label class="f" for="gn">Name</label><input class="in" id="gn" maxlength="40" value="${esc(g?.name||'')}" placeholder="e.g. Bridge St house, Montreal trip" autocomplete="off"${runsIt?'':' readonly aria-readonly="true" style="opacity:.7"'}>
-    ${runsIt?'':`<p class="note">Only ${esc(nameOf(g.createdBy))}, who made the group, can rename it or move other people out.</p>`}
+    ${runsIt?'':`<p class="note">Only ${esc(nameOf(g.createdBy))}, who runs the group, can rename it or move other people out.</p>`}
     ${!isNew?`<label class="f">Members</label><div class="card">${groupMembers(gid).map(memberRow).join('')}</div>`:''}
     ${!isNew && g.createdBy===myUid && heirs.length?`<label class="f">Hand the group over</label><div class="chips">${heirs.map(id=>`<button class="chip" data-handto="${esc(id)}">${av(id,'sm',gid)}<span class="ell" style="max-width:9em">${esc(nameOf(id))}</span></button>`).join('')}</div>
       <p class="note" id="handNote">You made this group, so you rename it and decide who moves out. Moving away? Pass that on to someone still in it.</p>`:''}
@@ -2587,7 +2587,7 @@ function openMember(gid, id){
     ${guest && !LAPTOP && !creator ? `<p class="note">If ${esc(firstName(id))} joins the app, ${esc(nameOf(g.createdBy))} can link their account.</p>`:''}
     ${canWrite?`<label class="f">${isMe?'Leave':'In the group'}</label>
       ${m.active===false ? `<button class="btn block" id="back">Bring ${esc(firstName(id))} back</button>`
-       : !canOut ? `<p class="note" style="margin-top:0">${id===g.createdBy ? `${esc(firstName(id))} made this group, so only they can leave it.` : `Only ${esc(nameOf(g.createdBy))}, who made the group, can move ${esc(firstName(id))} out.`}</p>`
+       : !canOut ? `<p class="note" style="margin-top:0">${id===g.createdBy ? `${esc(firstName(id))} runs this group, so only they can leave it.` : `Only ${esc(nameOf(g.createdBy))}, who runs the group, can move ${esc(firstName(id))} out.`}</p>`
        : `<button class="btn block" id="out" ${b||paysBills.length?'disabled':''}>${isMe?'Leave this group':`Move ${esc(firstName(id))} out`}</button>
           <p class="note">${b?`Settle the ${money(Math.abs(b))} balance first.`:paysBills.length?`${isMe?'You pay':'They pay'} ${paysBills.map(r=>esc(r.title)).join(', ')}. Change who pays first.`:'History stays. They’re taken out of future bills.'}</p>
           ${b && moving.length ? `<div class="card">${moving.map(p => { const w = waitingPay(gid, p); return `<div class="row"><div class="body"><div class="t">${esc(youOr(p.from))} ${verb(p.from,'pay')} ${esc(youOrLower(p.to))} <b>${money(p.amount)}</b></div>${w?`<small class="mut">Waiting for ${esc(youOrLower(p.to))} to confirm</small>`:''}</div>${w ? '' : `<button class="btn sm" data-mpay='${esc(JSON.stringify({...p, gid}))}'>Record</button>`}</div>`; }).join('')}</div>` : ''}
@@ -3222,13 +3222,21 @@ function openDetail(id, priv){
 }
 function bindDelete(sh, e){
   const ref = entryRef(e);
+  // two people paid: the bill is two entries, so they go to the bin and come back together
+  const mate = e.pair && (e._priv ? S.privEntries : S.expensesRaw).find(x => x._id===e.pair.other && x.pair?.other===e._id);
+  const both = (data, del) => mate && !!mate.deletedAt !== del
+    ? writeAll(w => { w.update(ref, data); w.update(entryRef(mate), data); }, `${del?'Removing':'Putting back'} ${e.title||'the expense'}`)
+    : ref.update(data);
   const res = sh.querySelector('#res');
-  if(res) res.onclick = async () => { if(await write(()=>ref.update({deletedAt:null, deletedBy:null}))){ closeSheet(); toast('Restored'); } };
+  if(res) res.onclick = async () => { if(await write(()=>both({deletedAt:null, deletedBy:null}, false))){ closeSheet(); toast('Restored'); } };
   const b = sh.querySelector('#del'); if(!b) return;
   b.onclick = async () => {
     if(b.dataset.armed!=='1'){ b.dataset.armed='1'; b.textContent='Tap again to delete'; return; }
-    if(await write(() => ref.update({deletedAt:Date.now(), deletedBy:myUid}))){ closeSheet();
-      toast('Moved to Recently deleted', {label:'Undo', fn:()=>write(()=>ref.update({deletedAt:null, deletedBy:null}))}); }
+    const pairNow = !!mate && !mate.deletedAt;
+    if(await write(() => both({deletedAt:Date.now(), deletedBy:myUid}, true))){ closeSheet();
+      toast(pairNow ? 'Both parts moved to Recently deleted' : 'Moved to Recently deleted', {label:'Undo', fn:()=>write(()=>pairNow
+        ? writeAll(w => { w.update(ref, {deletedAt:null, deletedBy:null}); w.update(entryRef(mate), {deletedAt:null, deletedBy:null}); }, `Putting back ${e.title||'the expense'}`)
+        : ref.update({deletedAt:null, deletedBy:null}))}); }
   };
 }
 
