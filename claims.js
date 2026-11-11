@@ -31,7 +31,7 @@ module.exports = function claims(h) {
   // the version and change log the server keeps on each entry don't count as "changed since"
   const bare = d => { if (!d || typeof d !== 'object') return d; const { v, changes, editedAt, editedBy, ...rest } = d; return rest; };
   const stamp = (uid, path, before, after) => h.stamp ? h.stamp(uid, path, before, after) : after;
-  const today = () => new Date().toISOString().slice(0, 10);
+  const today = () => { if (h.today) return h.today(); const d = new Date(), p = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; };   // the server's local day (TZ), not UTC
 
   // ---------- what a claim covers ----------
   const peopleOf = e => e.people || (e.kind === 'payment' ? [e.from, e.to] : [...new Set([e.paidBy, ...Object.keys(e.split || {})])]);
@@ -185,7 +185,8 @@ module.exports = function claims(h) {
   function apply(changes, uid) {
     const D = docs(), before = {};
     for (const [p, v0] of Object.entries(changes)) { before[p] = D[p] ?? null; const v = stamp(uid, p, before[p], v0); if (v == null) delete D[p]; else D[p] = v; }
-    saveDb(); broadcast(Object.keys(changes), null, before);
+    if (h.commit) h.commit(Object.keys(changes)); else saveDb();   // money moved: on disk now, like a save from the app
+    broadcast(Object.keys(changes), null, before);
   }
   function accept(c, to) {
     const p = plan(c, to);
@@ -226,7 +227,7 @@ module.exports = function claims(h) {
       if (c.status === 'yes' && c.changes && now() - c.answeredAt > UNDO_DAYS * 864e5) { delete c.changes; n++; }
       if (c.status !== 'open' && now() - (c.answeredAt || c.at) > 120 * 864e5) { delete store.claims[id]; n++; }
     }
-    if (n) save();
+    if (n) try { save(); } catch (e) { console.error('claims.json:', e.message); }   // only tidying: a full disk mustn't stop the list showing
   }
   const view = (c, uid) => ({ id: c.id, status: c.status, at: c.at, exp: c.exp, answeredAt: c.answeredAt || null, by: c.by, byName: nameFor(c.by),
     to: c.to || null, toName: c.to ? nameFor(c.to) : null, viaLink: !!c.invite, name: c.contact?.name || c.guests[0]?.name || '',
@@ -237,6 +238,9 @@ module.exports = function claims(h) {
   async function handle(req, res, url, uid) {
     const p = url.pathname, m = req.method;
     if (!p.startsWith('/api/claims')) return false;
+    // the laptop's disk is full: say so before anything is answered, handed over or undone
+    const sp = m !== 'GET' && h.storageProblem ? h.storageProblem() : null;
+    if (sp) return send(res, 507, { error: sp }), true;
     prune();
     if (p === '/api/claims' && m === 'GET') {
       const incoming = all().filter(c => live(c) && c.to === uid).map(c => { let pv = null; try { pv = preview(c, uid); } catch (e) { pv = { error: e.message }; } return { ...view(c, uid), preview: pv }; });
@@ -249,7 +253,7 @@ module.exports = function claims(h) {
       const t = checkTargets(uid, b || {});
       if (t.error) return send(res, 400, { error: t.error }), true;
       const to = b.to ? String(b.to) : null;
-      if (to && (!U().users[to] || to === uid)) return send(res, 400, { error: 'Pick someone else on Split it.' }), true;
+      if (to && (!Object.hasOwn(U().users, to) || to === uid)) return send(res, 400, { error: 'Pick someone else on Split it.' }), true;
       if (!to && !b.link && !b.dry) return send(res, 400, { error: 'Send it as a link or to someone on Split it.' }), true;
       const c = { id: crypto.randomBytes(9).toString('base64url'), by: uid, at: now(), exp: now() + (to ? OPEN_DAYS : 7) * 864e5, to, contact: t.contact, guests: t.guests, status: 'open' };
       let pv; try { pv = preview(c, to); } catch (e) { return send(res, 409, { error: e.message }), true; }
