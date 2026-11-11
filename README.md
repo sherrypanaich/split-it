@@ -1,10 +1,10 @@
 # Split it
 
-**Split bills with housemates, on a laptop you already own.** A free, open source [Budget It](https://sherrypanaich.github.io/split-it/) project.
+**Split bills with housemates, on a laptop you already own.** A free, open source [Budget It](https://splitit.budgetit.ca/) project.
 
 Split it tracks who paid for what in a shared home: rent, hydro, groceries, the Netflix nobody admits to using. Housemates sign in from their phones, anywhere. Everything is stored on your own machine, with no ads and no tracking.
 
-- Website: https://sherrypanaich.github.io/split-it/
+- Website: https://splitit.budgetit.ca/
 - Support it: https://github.com/sponsors/sherrypanaich
 - Licence: MIT (see `LICENSE`). Character art is not covered by the licence, see "Character art" below.
 
