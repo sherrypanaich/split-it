@@ -18,7 +18,9 @@ const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
 const zlib = require('zlib');
+const net = require('net');
 const push = require('./push');
+const { sessionKey, sessionGet, sessionDrop, migrateSessions, slideSession } = require('./accounts');
 
 const VERSION = '2.2.0';
 const STARTED = Date.now();
@@ -95,6 +97,7 @@ const flushDb = () => { if (dbTimer) { clearTimeout(dbTimer); dbTimer = null; } 
 const saveDb = () => { dbDirty = true; if (!dbTimer) dbTimer = setTimeout(flushDb, 600); };
 const saveUsers = () => save(USERS_FILE, users);
 const savePushes = () => save(PUSH_FILE, pushes);
+if (migrateSessions(users)) saveUsers();   // sign-in tokens are kept hashed now; older files are converted once, nobody is signed out
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { flushDb(); dropLock(); process.exit(0); });
 process.on('beforeExit', flushDb);
 
@@ -212,35 +215,108 @@ const unesc = v => { try { return decodeURIComponent(v); } catch { return v; } }
 const cookies = req => Object.fromEntries((req.headers.cookie || '').split(';')
   .map(c => c.trim().split('=')).filter(p => p[0]).map(([k, ...v]) => [k, unesc(v.join('='))]));
 function sessionUid(req) {
-  const t = cookies(req).hs, s = t && users.sessions[t];
+  const s = sessionGet(users, cookies(req).hs);
   if (!s || s.exp < Date.now() || !users.users[s.uid]) return null;
   return s.uid;
+}
+// A sign-in that is used keeps going: at most once a day it's pushed to SESSION_DAYS from now, and the cookie with it.
+function keepSession(req, res) {
+  const t = cookies(req).hs, s = sessionGet(users, t);
+  if (!s || !users.users[s.uid] || !slideSession(s, SESSION_DAYS)) return;
+  saveUsers(); setCookie(req, res, t, SESSION_DAYS * 86400);
 }
 const pruneSessions = () => { let n = 0; for (const [t, s] of Object.entries(users.sessions)) if (s.exp < Date.now() || !users.users[s.uid]) { delete users.sessions[t]; n++; } if (n) saveUsers(); };
 const secure = req => req.headers['x-forwarded-proto'] === 'https' || req.socket.encrypted;
 const setCookie = (req, res, val, maxAge) => res.setHeader('Set-Cookie',
-  `hs=${val}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure(req) ? '; Secure' : ''}`);
+  [...[].concat(res.getHeader('Set-Cookie') || []).filter(c => !String(c).startsWith('hs=')),
+    `hs=${val}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${secure(req) ? '; Secure' : ''}`]);
+
+// ---------- who is asking: the real address, also behind a proxy ----------
+// Behind Docker, Traefik, Coolify or a Cloudflare tunnel every request reaches the app from the proxy's address,
+// so the visitor's own address comes from the headers the proxy adds. Those are only believed when the request
+// itself comes from a proxy we trust: by default this computer or a private/Docker network address.
+// TRUSTED_PROXY (addresses or ranges, comma separated, e.g. 10.0.2.6,172.18.0.0/16) replaces that list; "none" never trusts them.
+function ipBytes(a) {   // any written form of an address -> 16 bytes (IPv4 as ::ffff:a.b.c.d), or null
+  a = String(a || '').trim().replace(/^\[([^\]]+)\](:\d+)?$/, '$1').replace(/%.*$/, '');
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(:\d+)?$/.exec(a);
+  if (v4) { const b = v4.slice(1, 5).map(Number); return b.some(x => x > 255) ? null : Buffer.from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, ...b]); }
+  if (!net.isIPv6(a)) return null;
+  let tail = null;
+  const m = /^(.*:)(\d+\.\d+\.\d+\.\d+)$/.exec(a);
+  if (m) { tail = ipBytes(m[2]); if (!tail) return null; a = m[1] + '0:0'; }
+  const [l, r] = a.split('::'), L = l ? l.split(':') : [], R = r === undefined ? null : r ? r.split(':') : [];
+  const g = R === null ? L : [...L, ...Array(Math.max(0, 8 - L.length - R.length)).fill('0'), ...R];
+  if (g.length !== 8) return null;
+  const buf = Buffer.alloc(16); g.forEach((x, i) => buf.writeUInt16BE(parseInt(x, 16) || 0, i * 2));
+  if (tail) tail.copy(buf, 12, 12);
+  return buf;
+}
+function parseRange(s) {   // "10.0.0.0/8", "fc00::/7", "10.0.2.6" -> { b, bits }
+  const [ip, n] = String(s).trim().split('/'), b = ipBytes(ip);
+  if (!b) return null;
+  const v4 = /^\d+\.\d+\.\d+\.\d+$/.test(ip.trim()), bits = n === undefined ? 128 : Number(n) + (v4 ? 96 : 0);
+  return Number.isInteger(bits) && bits >= 0 && bits <= 128 ? { b, bits } : null;
+}
+const inRange = (b, { b: r, bits }) => { for (let i = 0; i < 16 && bits > 0; i++, bits -= 8) { const mask = bits >= 8 ? 255 : (0xff << (8 - bits)) & 255; if ((b[i] & mask) !== (r[i] & mask)) return false; } return true; };
+const PRIVATE_NETS = ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '::1/128', 'fc00::/7'];
+function trustList(spec) {   // TRUSTED_PROXY -> ranges ([] for "none", the private networks when unset)
+  spec = String(spec ?? '').trim();
+  if (/^none$/i.test(spec)) return [];
+  if (!spec) return PRIVATE_NETS.map(parseRange);
+  return spec.split(',').map(x => x.trim()).filter(Boolean).map(x => { const r = parseRange(x); if (!r) console.error(`TRUSTED_PROXY: "${x}" isn’t an address or range, so it is left out.`); return r; }).filter(Boolean);
+}
+function makeClientIp(ranges) {
+  const trusted = a => { const b = ipBytes(a); return !!b && ranges.some(r => inRange(b, r)); };
+  return req => {
+    const peer = req.socket.remoteAddress || '';
+    if (!trusted(peer)) return peer;
+    const cf = String(req.headers['cf-connecting-ip'] || '').trim();
+    if (cf && ipBytes(cf)) return cf;
+    // Each proxy adds the address it heard from on the right, so the first one from the right we don't trust is the visitor.
+    const hops = String(req.headers['x-forwarded-for'] || '').split(',').map(x => x.trim()).filter(x => ipBytes(x));
+    for (let i = hops.length - 1; i >= 0; i--) if (!trusted(hops[i])) return hops[i];
+    return hops[0] || peer;   // everyone on the way is on a private network: the first one is the device itself
+  };
+}
+const clientIp = makeClientIp(trustList(process.env.TRUSTED_PROXY));
+const LOOPBACK = ['127.0.0.0/8', '::1/128'].map(parseRange);
+const FORWARD_HEADERS = ['x-forwarded-for', 'x-forwarded-host', 'x-real-ip', 'forwarded', 'cf-connecting-ip'];
+// Straight from this computer, not passed on by a proxy or tunnel running on it.
+const isLocalReq = req => { const b = ipBytes(req.socket.remoteAddress); return !!b && LOOPBACK.some(r => inRange(b, r)) && !FORWARD_HEADERS.some(k => req.headers[k] !== undefined); };
 
 // Slow down password guessing: 5 misses per address, then a 15 minute wait.
 const misses = new Map();
-// Only trust X-Forwarded-For when the request comes from this machine (a tunnel or proxy),
-// and then only its last entry, which the proxy itself added.
-const isLocal = a => /^(127\.|::1$|::ffff:127\.)/.test(a || '');
-const clientIp = req => {
-  const a = req.socket.remoteAddress || '', fwd = req.headers['x-forwarded-for'];
-  if (!fwd || !isLocal(a)) return a;
-  return String(fwd).split(',').map(x => x.trim()).filter(Boolean).pop() || a;
-};
-// The same goes for one account: 10 misses from anywhere, then a 15 minute wait, so guessing from many addresses is slow too.
 const recent = k => { const m = misses.get(k); return m && Date.now() - m.at < 15 * 60e3 ? m.n : 0; };
 const bump = k => { misses.set(k, { n: recent(k) + 1, at: Date.now() }); if (misses.size > 5000) for (const [key, m] of misses) if (Date.now() - m.at > 15 * 60e3) misses.delete(key); };
 const noteMiss = (req, uid) => { bump(clientIp(req)); if (uid) bump('acct:' + uid); };
-const tooManyTries = (req, uid) => recent(clientIp(req)) >= 5 || (uid && recent('acct:' + uid) >= 10) ? 'Too many tries. Wait 15 minutes.' : null;
-function checkLogin(req, name, password) {   // returns the uid, or null (and counts the miss)
+// Only the address is ever locked out. Misses aimed at one account (from anywhere) slow that account down instead,
+// so guessing from many addresses stays slow but nobody can keep a housemate out by typing their name.
+const tooManyTries = req => recent(clientIp(req)) >= 5 ? 'Too many tries. Wait 15 minutes.' : null;
+const slowFor = uid => { const n = uid ? recent('acct:' + uid) : 0; return n < 10 ? 0 : Math.min(10e3, 1000 * 2 ** (n - 10)); };
+const slowDown = uid => { const ms = slowFor(uid); return ms ? new Promise(r => setTimeout(r, ms)) : null; };
+async function checkLogin(req, name, password) {   // returns the uid, or null (and counts the miss)
   const found = findUser(name || '');
-  if (found && !tooManyTries(req, found[0]) && checkPw(String(password || ''), found[1])) { misses.delete(clientIp(req)); return found[0]; }
+  if (found && !tooManyTries(req)) { await slowDown(found[0]); if (checkPw(String(password || ''), found[1])) { misses.delete(clientIp(req)); return found[0]; } }
   noteMiss(req, found && found[0]);
   return null;
+}
+
+// ---------- where a request comes from ----------
+// A page on another site must not be able to make a signed-in browser change things here. Writes to /api/ and
+// the sign-in endpoints must come from this app's own pages when the browser says where they come from.
+// Assistants (/mcp, /oauth/token, /oauth/register) use their own keys and are left alone; so are laptop scripts that say nothing.
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+function fromElsewhere(req, p) {
+  if (!WRITE_METHODS.has(req.method) || !(p.startsWith('/api/') || p.startsWith('/auth/') || p === '/oauth/authorize')) return false;
+  let from = req.headers.origin;
+  if (from === undefined && req.headers.referer) from = req.headers.referer;
+  if (from === undefined) return false;
+  let host; try { host = new URL(String(from)).host.toLowerCase(); } catch { return true; }   // "null" or junk
+  if (!host) return true;
+  const ok = [req.headers.host];
+  if (clientIp(req) !== (req.socket.remoteAddress || '')) ok.push(String(req.headers['x-forwarded-host'] || '').split(',')[0]);   // through a trusted proxy
+  try { if (process.env.PUBLIC_URL) ok.push(new URL(process.env.PUBLIC_URL).host); } catch {}
+  return !ok.some(x => x && String(x).trim().toLowerCase() === host);
 }
 
 // ---------- access rules ----------
@@ -333,8 +409,8 @@ function entryProblem(uid, p, before, after, alsoNew = new Set()) {   // -> what
 // Every open page keeps one event stream. A change carries the documents themselves,
 // so phones patch them in place instead of downloading whole collections again.
 const listeners = new Map(); // res -> uid
-const streamToken = new Map(); // res -> the session it was opened with
-// Sign a person out: their sessions (all, or all but `keep`), the live streams those sessions opened,
+const streamToken = new Map(); // res -> the session it was opened with (its hashed key)
+// Sign a person out: their sessions (all, or all but `keep`, a hashed session key), the live streams those sessions opened,
 // and, when `assistants` is set, any AI assistant they connected. Used by reset, sign out everywhere and the owner tools.
 function endSessions(uid, { keep = null, assistants = false } = {}) {
   let n = 0;
@@ -458,7 +534,7 @@ function restoreZip(buf) {
   for (const f of ['db.json', 'users.json', 'push.json']) { const fp = path.join(DATA_DIR, f); if (fs.existsSync(fp)) fs.copyFileSync(fp, path.join(BACKUP_DIR, `before-restore-${stamp}-${f}`)); }
   db = next; dbDirty = true; flushDb();
   // Sessions are not restored: the ones signed out since the backup stay signed out, and current ones keep working if that person is still there.
-  if (nextUsers) { const now = users.sessions || {}; users = nextUsers; users.sessions = {};
+  if (nextUsers) { const now = users.sessions || {}; users = nextUsers; users.sessions = {}; users.sessionsHashed = true;
     for (const [t, s] of Object.entries(now)) if (users.users[s.uid]) users.sessions[t] = s;
     saveUsers(); }
   if (files['push-keys.json']) { try { const k = JSON.parse(files['push-keys.json'].toString('utf8')); if (k.publicKey && k.privateJwk) { fs.writeFileSync(PUSH_KEYS_FILE, files['push-keys.json']); pushKeys = push.loadKeys(PUSH_KEYS_FILE); } } catch {} }
@@ -874,14 +950,16 @@ async function handle(req, res) {
   // never through a tunnel or proxy, and only with the secret from data/server.lock.
   if (req.url === '/api/local/cli') {
     const tok = Buffer.from(String(req.headers['x-local-token'] || '')), want = Buffer.from(localToken || '');
-    const direct = isLocal(req.socket.remoteAddress) && !req.headers['x-forwarded-for'] && !req.headers['x-forwarded-host'];
+    const direct = isLocalReq(req);
     if (req.method !== 'POST' || !direct || !want.length || tok.length !== want.length || !crypto.timingSafeEqual(tok, want)) return send(res, 404, { error: 'not found' });
     return send(res, 200, localCommand(await readBody(req)));
   }
-  if (await mcp.handle(req, res)) return;   // AI assistant connector (mcp.js)
   const url = new URL(req.url, 'http://x');
   const p = url.pathname;
+  if (fromElsewhere(req, p)) return send(res, 403, { error: 'That came from another website, so it was stopped. Open Split it itself and try again.' });
+  if (await mcp.handle(req, res)) return;   // AI assistant connector (mcp.js)
   const uid = sessionUid(req);
+  if (uid && !p.startsWith('/auth/')) keepSession(req, res);
 
   if (PUBLIC_FILES.has(p)) return file(res, p.slice(1), null, p === '/sw.js' ? 'no-cache' : 'public, max-age=86400');
   if (/^\/art\/[a-z0-9-]+\.(webp|png)$/.test(p)) return file(res, p.slice(1), null, 'public, max-age=604800');
@@ -895,7 +973,8 @@ async function handle(req, res) {
   if (p === '/api/login' && req.method === 'POST') {
     const { name, password } = await readBody(req);
     const found = findUser(name || '');
-    const wait = tooManyTries(req, found && found[0]); if (wait) return send(res, 429, { error: wait });
+    const wait = tooManyTries(req); if (wait) return send(res, 429, { error: wait });
+    if (found) await slowDown(found[0]);
     if (!found || !checkPw(String(password || ''), found[1])) {
       noteMiss(req, found && found[0]);
       return send(res, 401, { error: 'That name and password don’t match.' });
@@ -903,15 +982,11 @@ async function handle(req, res) {
     misses.delete(clientIp(req));
     // a sign-in code is on for this person: the password was step one, the code is step two (accounts.js)
     if (accounts.needsCode(found[0])) return send(res, 200, { need: 'code', ticket: accounts.codeTicket(found[0]) });
-    const token = crypto.randomBytes(32).toString('hex');
-    for (const [t, s] of Object.entries(users.sessions)) if (s.exp < Date.now()) delete users.sessions[t];
-    users.sessions[token] = { uid: found[0], exp: Date.now() + SESSION_DAYS * 864e5 };
-    saveUsers();
-    setCookie(req, res, token, SESSION_DAYS * 86400);
+    accounts.startSession(req, res, found[0]);
     return send(res, 200, { ok: true });
   }
   if (p === '/api/logout') {
-    const t = cookies(req).hs; if (t) { delete users.sessions[t]; saveUsers(); }
+    if (sessionDrop(users, cookies(req).hs)) saveUsers();
     setCookie(req, res, '', 0);
     res.writeHead(302, { Location: '/login' }); return res.end();
   }
@@ -1125,7 +1200,7 @@ async function handle(req, res) {
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write(`: hi\nevent: hello\ndata: ${JSON.stringify({ version: VERSION })}\n\n`);
-    listeners.set(res, uid); streamToken.set(res, cookies(req).hs || null);
+    listeners.set(res, uid); streamToken.set(res, cookies(req).hs ? sessionKey(cookies(req).hs) : null);
     req.on('close', () => { listeners.delete(res); streamToken.delete(res); });
     return;
   }
@@ -1134,15 +1209,17 @@ async function handle(req, res) {
 
 const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it.env', cookieName: 'hs', tagline: 'by Budget it',
   users: () => users, saveUsers, endSessions, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
-  setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS });
+  setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, slowDown, nameFor, readBody, send, file, secure, SESSION_DAYS });
 
 // AI assistant connector (Muse, Claude...): see mcp.js
 const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, allDebts, sharedEntries, netOf,
-  nameFor, cad, segs, secure, findUser, tooManyTries, checkLogin, noteMiss, computeSplit, billDate, billNextKey, billFirstKey, simplified, pairwiseOf, version: VERSION,
-  needsCode: uid => accounts.needsCode(uid), checkCode: (uid, code) => accounts.checkCode(uid, code) });
+  nameFor, cad, segs, secure, findUser, tooManyTries, checkLogin, noteMiss, slowDown, clientIp, computeSplit, billDate, billNextKey, billFirstKey, simplified, pairwiseOf, version: VERSION,
+  needsCode: uid => accounts.needsCode(uid), checkCode: (uid, code) => accounts.checkCode(uid, code),
+  // who is signed in to the app in this browser, for one-tap "Allow" on the connect page
+  session: req => { const t = cookies(req).hs, s = sessionGet(users, t); return s && s.exp > Date.now() && users.users[s.uid] ? { uid: s.uid, key: sessionKey(t), name: users.users[s.uid].name } : null; } });
 
 // The split engine and balance rules, for the tests (node --test test/*.test.js).
-module.exports = { splitEqual, splitShares, itemsSplit, computeSplit, netOf, pairwiseOf, simplified, billDate, billNextKey, billFirstKey, billDueOn, zipWrite, zipRead, crc32, newerThan };
+module.exports = { ipBytes, trustList, makeClientIp, isLocalReq, fromElsewhere, splitEqual, splitShares, itemsSplit, computeSplit, netOf, pairwiseOf, simplified, billDate, billNextKey, billFirstKey, billDueOn, zipWrite, zipRead, crc32, newerThan };
 
 if (require.main === module) {
   if (process.argv[2]) {
