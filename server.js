@@ -1861,15 +1861,17 @@ async function handle(req, res) {
   send(res, 404, { error: 'not found' });
 }
 
+// a friend request or a hand-over for someone: their open pages look at what's waiting right away, not at the next check
+const inboxFor = uids => { for (const [res, who] of listeners) if (uids.includes(who)) res.write('event: inbox\ndata: {}\n\n'); };
 const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it.env', cookieName: 'hs', tagline: 'by Budget it',
   users: () => users, saveUsers, endSessions, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
   setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, slowDown, nameFor, readBody, send, file, secure, SESSION_DAYS,
-  notify: (uids, msg) => notify(uids, msg), inviteInfo: inv => claims.forInvite(inv), onJoin: (inv, id) => claims.onJoin(inv, id), cancelClaim: id => claims.cancelById(id) });
+  notify: (uids, msg) => { inboxFor(uids); return notify(uids, msg); }, inviteInfo: inv => claims.forInvite(inv), onJoin: (inv, id) => claims.onJoin(inv, id), cancelClaim: id => claims.cancelById(id) });
 
 // Taking over history someone logged under your name before you joined: see claims.js
 const refreshFor = uids => { for (const [res, who] of listeners) if (uids.includes(who)) res.write('event: refresh\ndata: {}\n\n'); };
 const claims = require('./claims')({ DATA_DIR, docs: () => db.docs, users: () => users, saveDb, saveUsers, broadcast, refresh: refreshFor,
-  notify: (uids, msg) => notify(uids, msg).catch(e => console.error(e)), nameFor, segs, memberOf, cad, readBody, send, stamp: (uid, path, before, after) => stampEntry(uid, path, before, after) });
+  notify: (uids, msg) => { inboxFor(uids); return notify(uids, msg).catch(e => console.error(e)); }, nameFor, segs, memberOf, cad, readBody, send, stamp: (uid, path, before, after) => stampEntry(uid, path, before, after) });
 
 // AI assistant connector (Muse, Claude...): see mcp.js
 const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, writeOps, allDebts, sharedEntries, netOf,

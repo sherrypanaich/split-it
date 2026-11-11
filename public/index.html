@@ -1877,7 +1877,7 @@ async function loadInbox(force){
     if(sig !== was) schedule();
   }catch(e){}
 }
-if(LAPTOP){ document.addEventListener('visibilitychange', () => { if(!document.hidden) loadInbox(); }); setInterval(() => { if(!document.hidden) loadInbox(); }, 60000); }
+if(LAPTOP){ addEventListener('hs-inbox', () => loadInbox(true)); document.addEventListener('visibilitychange', () => { if(!document.hidden) loadInbox(); }); setInterval(() => { if(!document.hidden) loadInbox(); }, 60000); }
 const plural = (n, one, many) => `${n} ${n===1?one:(many||one+'s')}`;
 const loadQr = () => window.qrSvg ? Promise.resolve() : new Promise((ok, no) => { const s = document.createElement('script'); s.src = '/qr.js'; s.onload = ok; s.onerror = no; document.head.appendChild(s); });
 async function qrInto(el, text){ try{ await loadQr(); el.innerHTML = window.qrSvg(text); }catch(e){ el.innerHTML = '<p class="note">The QR code didn’t load. Copy the link instead.</p>'; } }

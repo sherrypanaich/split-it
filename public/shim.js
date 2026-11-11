@@ -191,6 +191,7 @@
     });
     es.addEventListener('reload', () => setTimeout(() => location.reload(), 800));
     es.addEventListener('refresh', () => subs.forEach(s => s.refresh()));   // joined or left a group
+    es.addEventListener('inbox', () => window.dispatchEvent(new Event('hs-inbox')));   // a friend request or a hand-over arrived
     es.onopen = () => { if (dropped) { dropped = false; subs.forEach(s => s.refresh()); } lastAnswer = Date.now(); offlineNow(false); window.dispatchEvent(new Event('hs-online')); flush(); };
     es.onerror = () => { es.close(); es = null; dropped = true; window.dispatchEvent(new Event('hs-offline')); setTimeout(connect, 3000); };
   };
