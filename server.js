@@ -142,11 +142,11 @@ const save = (file, obj) => {
   }
   delete storage.failing[name];
 };
-// The reason writes are refused right now, or null. Tries the failed saves again (at most every 10 seconds) first.
+// The reason writes are refused right now, or null. Tries the failed saves again (at most every 3 seconds) first.
 function storageProblem() {
   if (!Object.keys(storage.failing).length) return null;
   if (Date.now() >= storage.retryAt) {
-    storage.retryAt = Date.now() + 10e3;
+    storage.retryAt = Date.now() + 3e3;
     for (const [name, f] of Object.entries(storage.failing)) {
       if (name === 'db.json') { if (dbDirty) flushDb(); else delete storage.failing[name]; }
       else try { save(f.file, f.obj); } catch {}
@@ -466,8 +466,9 @@ try { const n = newestBackups()[0]; if (n) lastBackupAt = fs.statSync(n).mtimeMs
 function backup(atStart) {
   try {
     if (!flushDb()) throw diskError(Object.assign(new Error('db.json couldn’t be saved'), { code: storage.failing['db.json']?.code }));
+    if (!fs.existsSync(DB_FILE)) save(DB_FILE, db);   // a brand-new install: the first copy still has something to copy
     const now = new Date(), day = localDay(now);
-    if (fs.existsSync(DB_FILE)) {
+    {
       const daily = path.join(BACKUP_DIR, `db-${day}.json`);
       if (!fs.existsSync(daily)) { fs.copyFileSync(DB_FILE, daily); lastBackupAt = Date.now(); }
       const weekly = path.join(BACKUP_DIR, `db-weekly-${day}.json`);
