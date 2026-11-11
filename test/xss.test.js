@@ -124,6 +124,7 @@ test('text people type never runs as code on the page', { skip: why, timeout: 24
     // The walk must actually reach the text; otherwise a pass means nothing.
     const missing = FIELDS.filter(f => !seen.has(f));
     assert.deepStrictEqual(missing, [], 'these fields were never seen on screen, so they were not checked: ' + missing.join(', '));
+    assert.deepStrictEqual(pageErrors, [], "the page threw errors");
   } finally {
     if (browser) await browser.close().catch(() => {});
     const gone = new Promise(r => proc.on('exit', r)); proc.kill(); await gone;
