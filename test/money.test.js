@@ -204,6 +204,19 @@ test('a bill stops charging someone who left without the move-out helper, and th
   assert.strictEqual((await ana.write(member(HOUSE, ben.uid))).status, 200);
 });
 
+test('someone who moves out is taken out of the chore rotation, and whoever’s turn it is keeps it', async () => {
+  const chore = (id, order, turn) => ({ op: 'set', path: 'chores/' + id, data: { groupId: HOUSE, title: id, every: 7, order, turn, due: '2099-01-01', createdAt: Date.now(), addedBy: ana.uid } });
+  assert.strictEqual((await ana.write(member(HOUSE, 'guest_eve', { kind: 'guest', name: 'Eve' }))).status, 200);
+  assert.strictEqual((await ana.write(chore('c_trash', [ana.uid, 'guest_eve', ben.uid], 2), chore('c_dishes', [ana.uid, 'guest_eve', ben.uid], 1),
+    chore('c_floor', [ana.uid, ben.uid], 0))).status, 200);
+  assert.strictEqual((await ana.write({ op: 'update', path: `groups/${HOUSE}/members/guest_eve`, data: { active: false, leftAt: Date.now() } })).status, 200);
+  const who = c => c.order[c.turn % c.order.length];
+  const trash = await ana.doc('chores/c_trash'), dishes = await ana.doc('chores/c_dishes'), floor = await ana.doc('chores/c_floor');
+  assert.deepStrictEqual(trash.order, [ana.uid, ben.uid]); assert.strictEqual(who(trash), ben.uid, 'it stays Ben’s turn');
+  assert.deepStrictEqual(dishes.order, [ana.uid, ben.uid]); assert.strictEqual(who(dishes), ben.uid, 'it was Eve’s turn, so the next person takes it');
+  assert.deepStrictEqual([floor.order, floor.turn], [[ana.uid, ben.uid], 0], 'a chore without Eve is left alone');
+});
+
 test('another home currency, and rates from an older day when the service is down', async () => {
   ratesDown = true;
   const old = { base: 'EUR', date: '2026-11-02', rates: { EUR: 1, USD: 1.1, CAD: 1.45 }, fetchedAt: Date.now() - 3 * 864e5 };

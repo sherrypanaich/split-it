@@ -263,7 +263,7 @@ test('one bad change in a batch stops the whole batch', async () => {
 
 // ---------- batches: several changes that belong together ----------
 // Open someone's live-update stream and collect what it sends for a moment.
-async function listen(b, ms, during) {
+async function listen(b, ms, during, kind = 'change') {
   const ctl = new AbortController(), events = [];
   const r = await fetch(`http://127.0.0.1:${PORT}/api/events`, { headers: { Cookie: b.cookie() }, signal: ctl.signal });
   const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
@@ -273,8 +273,17 @@ async function listen(b, ms, during) {
   await during();
   await new Promise(res => setTimeout(res, ms));
   ctl.abort(); await pump;
-  return events.filter(e => e.ev === 'change');
+  return events.filter(e => e.ev === kind);
 }
+
+test('a friend request reaches the other person’s open page right away', async () => {
+  const got = await listen(cat, 300, async () => { assert.strictEqual((await ben.post('/api/friends/request', { to: cat.uid })).status, 200); }, 'inbox');
+  assert.strictEqual(got.length, 1, 'their page is told to look at what’s waiting');
+  const quiet = await listen(ana, 300, async () => { await ben.post('/api/friends/request', { to: cat.uid }); }, 'inbox');
+  assert.strictEqual(quiet.length, 0, 'nobody else is');
+  const r = (await cat.get('/api/friends/requests')).data.incoming.find(x => x.uid === ben.uid);
+  assert.strictEqual((await cat.post('/api/friends/answer', { id: r.id, yes: false })).status, 200);
+});
 
 test('a batch saves every change together, with one live update', async () => {
   const p1 = id('p'), p2 = id('p'), bill = id('r');

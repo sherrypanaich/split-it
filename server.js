@@ -212,7 +212,7 @@ function removeUser(id) {
   const u = userOf(id); if (!u) return null;
   mcp.revoke(id);
   // bills they're in stop until their groups pick who takes over
-  for (const k of Object.keys(db.docs)) { const s = segs(k); if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && s[3] === id && db.docs[k] && db.docs[k].active !== false) pauseBillsFor(s[1], id, null, nameFor(id)); }
+  for (const k of Object.keys(db.docs)) { const s = segs(k); if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && s[3] === id && db.docs[k] && db.docs[k].active !== false) leftGroup(s[1], id, null, nameFor(id)); }
   let n = 0;
   for (const [t, sess] of Object.entries(users.sessions)) if (sess.uid === id) { delete users.sessions[t]; n++; }
   delete users.users[id];
@@ -545,14 +545,14 @@ function groupProblem(uid, p, before, after) {   // -> what's wrong in plain wor
   if (!boss || boss === uid) return null;
   const who = nameFor(boss);
   if (s.length === 2) {
-    if (after == null) return `Only ${who}, who made this group, can delete it.`;
-    if (after.createdBy !== before.createdBy) return `Only ${who}, who made this group, can hand it over.`;
-    if ((after.name ?? null) !== (before.name ?? null)) return `Only ${who}, who made this group, can rename it.`;
+    if (after == null) return `Only ${who}, who runs this group, can delete it.`;
+    if (after.createdBy !== before.createdBy) return `Only ${who}, who runs this group, can hand it over.`;
+    if ((after.name ?? null) !== (before.name ?? null)) return `Only ${who}, who runs this group, can rename it.`;
     return null;
   }
   if (s.length === 4) {
     const out = after == null || (before.active !== false && after.active === false);
-    if (out && s[3] !== uid && !(before.kind === 'guest' && before.addedBy === uid)) return `Only ${who}, who made this group, can take someone else out of it.`;
+    if (out && s[3] !== uid && !(before.kind === 'guest' && before.addedBy === uid)) return `Only ${who}, who runs this group, can take someone else out of it.`;
   }
   return null;
 }
@@ -1296,12 +1296,28 @@ function pauseBillsFor(gid, id, by, name) {
     body: `${list} ${titles.length === 1 ? 'is' : 'are'} paused so nobody is charged by mistake. Open Split it to pick who takes over.`, tag: 'takeover-' + gid }).catch(e => console.error(e));
   return hit;
 }
+// Someone left a group: take them out of its chore rotations, so it never becomes their turn again.
+// Whoever's turn it is now keeps it (or, if it was the leaver's, the next person in the order takes it).
+function dropFromChores(gid, id) {
+  const hit = [];
+  for (const [k, c] of Object.entries(db.docs)) {
+    const s = segs(k);
+    if (s[0] !== 'chores' || s.length !== 2 || !c || c.groupId !== gid || !Array.isArray(c.order) || !c.order.includes(id)) continue;
+    const n = c.order.length, at = (Number(c.turn) || 0) % n, j = c.order.indexOf(id), order = c.order.filter(x => x !== id);
+    const turn = order.length ? (j < at ? at - 1 : at) % order.length : 0;
+    db.docs[k] = { ...c, order, turn };
+    hit.push(k);
+  }
+  if (hit.length) { saveDb(); broadcast(hit); }
+  return hit;
+}
+function leftGroup(gid, id, by, name) { dropFromChores(gid, id); return pauseBillsFor(gid, id, by, name); }
 // After a write: anyone who just left a group (made inactive, or taken out) gets their bills paused.
 function leaversIn(uid, ops, before) {
   for (const o of ops) {
     const s = segs(o.path), was = before[o.path], now = db.docs[o.path];
     if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && was && was.active !== false && (now == null || now.active === false))
-      pauseBillsFor(s[1], s[3], uid, was.name);
+      leftGroup(s[1], s[3], uid, was.name);
   }
 }
 
@@ -1454,11 +1470,11 @@ function forgetPerson(uid) {
   users.former = users.former || {}; users.former[uid] = Date.now();
   try { saveUsers(); } catch (e) { delete users.former[uid]; throw e; }
   const put = (k, d) => { if (!Object.hasOwn(before, k)) before[k] = db.docs[k]; if (d == null) delete db.docs[k]; else db.docs[k] = d; changed.push(k); };
+  // first, while they still count as in their groups: pause the bills they're in and take them out of chores
+  for (const [k, d] of Object.entries(db.docs)) { const s = segs(k); if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && s[3] === uid && d && d.active !== false) leftGroup(s[1], uid, null, nameFor(uid)); }
   for (const [k, d] of Object.entries(db.docs)) {
     const s = segs(k);
     if ((s[0] === 'data' && s[2] === uid) || (s[0] === 'people' && s[1] === uid)) { put(k, null); removed++; continue; }
-    // still in the group: their bills pause and the group picks who takes over (removeUser can't see it once they're a former member)
-    if (s[0] === 'groups' && s.length === 4 && s[3] === uid && d && d.active !== false) pauseBillsFor(s[1], uid, null, name);
     if (s[0] === 'groups' && s.length === 4 && s[3] === uid && d) put(k, { kind: 'guest', name: 'Former member', color: d.color || 0, active: false, leftAt: d.leftAt || Date.now(), joinedAt: d.joinedAt || null });
     if (s[0] === 'groups' && s.length === 2 && d?.createdBy === uid) {
       const next = activeMembers(s[1]).find(x => x !== uid);
@@ -1860,16 +1876,18 @@ async function handle(req, res) {
   send(res, 404, { error: 'not found' });
 }
 
+// a friend request or a hand-over for someone: their open pages look at what's waiting right away, not at the next check
+const inboxFor = uids => { for (const [res, who] of listeners) if (uids.includes(who)) res.write('event: inbox\ndata: {}\n\n'); };
 const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it.env', cookieName: 'hs', tagline: 'by Budget it',
   users: () => users, saveUsers, endSessions, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
   setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, slowDown, nameFor, readBody, send, file, secure, SESSION_DAYS,
-  notify: (uids, msg) => notify(uids, msg), inviteInfo: inv => claims.forInvite(inv), onJoin: (inv, id) => claims.onJoin(inv, id), cancelClaim: id => claims.cancelById(id) });
+  notify: (uids, msg) => { inboxFor(uids); return notify(uids, msg); }, inviteInfo: inv => claims.forInvite(inv), onJoin: (inv, id) => claims.onJoin(inv, id), cancelClaim: id => claims.cancelById(id) });
 
 // Taking over history someone logged under your name before you joined: see claims.js
 const refreshFor = uids => { for (const [res, who] of listeners) if (uids.includes(who)) res.write('event: refresh\ndata: {}\n\n'); };
 const claims = require('./claims')({ DATA_DIR, docs: () => db.docs, users: () => users, saveDb, saveUsers, broadcast, refresh: refreshFor,
   today: localDay, storageProblem, commit: paths => commitDb(paths),
-  notify: (uids, msg) => notify(uids, msg).catch(e => console.error(e)), nameFor, segs, memberOf, cad, readBody, send, stamp: (uid, path, before, after) => stampEntry(uid, path, before, after) });
+  notify: (uids, msg) => { inboxFor(uids); return notify(uids, msg).catch(e => console.error(e)); }, nameFor, segs, memberOf, cad, readBody, send, stamp: (uid, path, before, after) => stampEntry(uid, path, before, after) });
 
 // AI assistant connector (Muse, Claude...): see mcp.js
 const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, writeOps, allDebts, sharedEntries, netOf,

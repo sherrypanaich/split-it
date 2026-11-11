@@ -241,7 +241,7 @@ test('only the group’s creator can rename it, delete it or hand it over', asyn
   const g = await newGroup(ana, [ben]);
   assert.strictEqual((await ben.update('groups/' + g, { name: 'Ben’s house' })).status, 403);
   const r = await ben.update('groups/' + g, { createdBy: ben.uid });
-  assert.strictEqual(r.status, 403); assert.match(r.data.error, /Ana, who made this group/);
+  assert.strictEqual(r.status, 403); assert.match(r.data.error, /Ana, who runs this group/);
   assert.strictEqual((await ben.del('groups/' + g)).status, 403);
   assert.strictEqual((await ben.set('groups/' + g, { name: 'Taken', createdBy: ben.uid })).status, 403);
   assert.strictEqual((await ben.update('groups/' + g, { emoji: 'party', simplify: false })).status, 200, 'everyday settings are for everyone');
@@ -384,6 +384,21 @@ test('delete my data needs the password, removes the private data, and keeps sha
   const db = JSON.parse(fs.readFileSync(path.join(DATA, 'db.json'), 'utf8'));
   assert.ok(!Object.keys(db.docs).some(k => k.startsWith(`data/users/${gus.uid}/`)), 'private data gone from the file too');
   assert.ok(!JSON.stringify(db).includes('Gussie'));
+});
+
+test('delete my data pauses the bills that person was in and takes them out of chores', async () => {
+  assert.match(cli(['add-user', 'Ivy'], 'ivy-password\n'), /Added/);
+  const ivy = await as('Ivy');
+  const g = await newGroup(ana, [ivy]);
+  await ana.set('recurring/r_ivy', { groupId: g, title: 'Rent', amount: 90000, paidBy: ana.uid, splitMode: 'equal', splitInput: { ids: [ana.uid, ivy.uid] },
+    day: 1, every: 'month', startMonth: '2099-01', lastPosted: null, paused: false, createdAt: Date.now(), addedBy: ana.uid });
+  await ana.set('chores/c_ivy', { groupId: g, title: 'Trash', every: 7, order: [ana.uid, ivy.uid], turn: 1, due: '2099-01-01', createdAt: Date.now(), addedBy: ana.uid });
+  assert.strictEqual((await ivy.post('/api/me/delete', { password: 'ivy-password' })).status, 200);
+  const bill = await ana.data('recurring/r_ivy');
+  assert.strictEqual(bill.paused, true, 'the bill doesn’t keep charging someone who is gone');
+  assert.strictEqual(bill.takeover.who, ivy.uid);
+  const c = await ana.data('chores/c_ivy');
+  assert.deepStrictEqual([c.order, c.turn], [[ana.uid], 0]);
 });
 
 test('the only owner can’t delete themselves away, and the owner can still remove people', async () => {

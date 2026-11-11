@@ -935,7 +935,7 @@ function nameOf(id){
   if(S.people[id]) return S.people[id].nickname || S.prof[id]?.name || 'Someone';
   const r = personRec(id); return r?.name || 'Former member';
 }
-const firstName = id => nameOf(id).split(' ')[0];
+const firstName = id => { const n = nameOf(id); return n==='Former member' ? n : n.split(' ')[0]; };   // not “Former”
 const colorOf = id => { const r = personRec(id); return r ? COLORS[(r.color||0) % COLORS.length] : '#8A87A0'; };
 const youOr = id => id === myUid ? 'You' : nameOf(id);
 const youOrLower = id => id === myUid ? 'you' : nameOf(id);
@@ -1287,6 +1287,8 @@ function render(){
   const keep = document.activeElement?.id; const qv = app.querySelector('#quickIn')?.value || '';
   let html;
   if(S.page?.type==='group') html = S.groups[S.page.id] ? viewGroup(S.page.id) : pageBar('groups','groups','Opening group…');
+  // a contact or name-only member who just took over their history (or was removed) is gone: back to the friends list
+  else if(S.page?.type==='friend' && !S.people[S.page.id] && !friendIds().includes(S.page.id)){ S.page = null; S.tab = 'friends'; html = viewFriends(); }
   else if(S.page?.type==='friend') html = viewFriend(S.page.id);
   else { S.page = null; html = ({home:viewHome, groups:viewGroups, friends:viewFriends, activity:viewActivity})[S.tab](); }
   app.innerHTML = ownerBanner() + (!canWrite ? `<div class="banner">You can look around, but you need Contributor or Editor access to add anything. ${LAPTOP?'Ask whoever runs Split it to give you access.':'Ask whoever shared this to change it in the Share menu.'}</div>` : '') + html;
@@ -1421,7 +1423,11 @@ function bind(){
   on('#gAct','onclick',el=>openGroupActivity(el.dataset.gid));
   on('#fAdd','onclick',el=>openExpense({ctx:{type:'friend',id:el.dataset.fid}}));
   on('#fSettle','onclick',el=>openFriendSettle(el.dataset.fid));
-  on('#fRemind','onclick',el=>{ const v = friendTotal(el.dataset.fid); nudge({from:el.dataset.fid, to:myUid, amount:v}); });
+  on('#fRemind','onclick',el=>{ const fid = el.dataset.fid;
+    // a payment they marked as sent counts as paid here too, as it does on the laptop
+    const sent = alive(S.expensesRaw).filter(e => e.kind==='payment' && e.confirmed===false && e.from===fid && e.to===myUid).reduce((t,e)=>t+e.amount,0), v = friendTotal(fid) - sent;
+    if(v <= 0) return toast(`${firstName(fid)} already marked it paid. Confirm it once you’ve got it`);
+    nudge({from:fid, to:myUid, amount:v}); });
   on('#fEdit','onclick',el=>openContact(el.dataset.fid));
   on('#profBtn','onclick',()=>openProfile());
   on('[data-fav]','onclick',el=>useFav(el.dataset.fav));
@@ -1829,7 +1835,7 @@ async function choreDone(id){
   const n = (c.order||[]).length || 1, base = c.due && c.due >= today() ? c.due : today();
   if(await write(()=>db.doc('chores/'+id).update({turn:((c.turn||0)+1) % n, due:nextDate(base, c.every||7), lastBy:myUid, lastAt:Date.now()}))){
     const nx = (c.order||[])[((c.turn||0)+1) % n]; buzz(15);
-    toast(`Nice! ${nx && nx!==myUid ? firstName(nx)+'’s turn next' : 'Done'}`);
+    toast(`Nice! ${!nx || n===1 ? 'Done' : nx===myUid ? 'Your turn next' : firstName(nx)+'’s turn next'}`);
   }
 }
 function choreRow(c, showGroup){
@@ -1901,7 +1907,7 @@ async function loadInbox(force){
     if(sig !== was) schedule();
   }catch(e){}
 }
-if(LAPTOP){ document.addEventListener('visibilitychange', () => { if(!document.hidden) loadInbox(); }); setInterval(() => { if(!document.hidden) loadInbox(); }, 60000); }
+if(LAPTOP){ addEventListener('hs-inbox', () => loadInbox(true)); document.addEventListener('visibilitychange', () => { if(!document.hidden) loadInbox(); }); setInterval(() => { if(!document.hidden) loadInbox(); }, 60000); }
 const plural = (n, one, many) => `${n} ${n===1?one:(many||one+'s')}`;
 const loadQr = () => window.qrSvg ? Promise.resolve() : new Promise((ok, no) => { const s = document.createElement('script'); s.src = '/qr.js'; s.onload = ok; s.onerror = no; document.head.appendChild(s); });
 async function qrInto(el, text){ try{ await loadQr(); el.innerHTML = window.qrSvg(text); }catch(e){ el.innerHTML = '<p class="note">The QR code didn’t load. Copy the link instead.</p>'; } }
@@ -1974,7 +1980,7 @@ function openClaim(c){
     sh.querySelector('#no').onclick = async e => { if(!confirmTap(e.currentTarget, 'Tap again: it’s not me')) return;
       try{ await api('/api/claims/answer', { id:c.id, yes:false }); closeSheet(); toast(`Got it. We told ${c.byName}`); }catch(x){ toast(x.message); } loadInbox(true); };
     sh.querySelector('#yes').onclick = async e => { const b = e.currentTarget; b.disabled = true; b.textContent = 'Moving it…';
-      try{ await api('/api/claims/answer', { id:c.id, yes:true }); closeSheet(); celebrate('It’s all yours now'); }
+      try{ await api('/api/claims/answer', { id:c.id, yes:true }); closeSheet(); toast('It’s all yours now'); }
       catch(x){ toast(x.message); b.disabled = false; b.textContent = 'Yes, that’s me'; } loadInbox(true); };
   });
 }
@@ -2502,7 +2508,7 @@ function openGroupEditor(gid){
   openSheet(head(isNew?'New group':'Group settings') + `
     <label class="f">Icon</label><div class="chips">${GROUP_ICONS.map(e=>`<button class="chip iconchip" data-emo="${e}" aria-label="${e}">${icon(e)}</button>`).join('')}</div>
     <label class="f" for="gn">Name</label><input class="in" id="gn" maxlength="40" value="${esc(g?.name||'')}" placeholder="e.g. Bridge St house, Montreal trip" autocomplete="off"${runsIt?'':' readonly aria-readonly="true" style="opacity:.7"'}>
-    ${runsIt?'':`<p class="note">Only ${esc(nameOf(g.createdBy))}, who made the group, can rename it or move other people out.</p>`}
+    ${runsIt?'':`<p class="note">Only ${esc(nameOf(g.createdBy))}, who runs the group, can rename it or move other people out.</p>`}
     ${!isNew?`<label class="f">Members</label><div class="card">${groupMembers(gid).map(memberRow).join('')}</div>`:''}
     ${!isNew && g.createdBy===myUid && heirs.length?`<label class="f">Hand the group over</label><div class="chips">${heirs.map(id=>`<button class="chip" data-handto="${esc(id)}">${av(id,'sm',gid)}<span class="ell" style="max-width:9em">${esc(nameOf(id))}</span></button>`).join('')}</div>
       <p class="note" id="handNote" aria-live="polite">You made this group, so you rename it and decide who moves out. Moving away? Pass that on to someone still in it.</p>`:''}
@@ -2611,7 +2617,7 @@ function openMember(gid, id){
     ${guest && !LAPTOP && !creator ? `<p class="note">If ${esc(firstName(id))} joins the app, ${esc(nameOf(g.createdBy))} can link their account.</p>`:''}
     ${canWrite?`<label class="f">${isMe?'Leave':'In the group'}</label>
       ${m.active===false ? `<button class="btn block" id="back">Bring ${esc(firstName(id))} back</button>`
-       : !canOut ? `<p class="note" style="margin-top:0">${id===g.createdBy ? `${esc(firstName(id))} made this group, so only they can leave it.` : `Only ${esc(nameOf(g.createdBy))}, who made the group, can move ${esc(firstName(id))} out.`}</p>`
+       : !canOut ? `<p class="note" style="margin-top:0">${id===g.createdBy ? `${esc(firstName(id))} runs this group, so only they can leave it.` : `Only ${esc(nameOf(g.createdBy))}, who runs the group, can move ${esc(firstName(id))} out.`}</p>`
        : `<button class="btn block" id="out" ${b||paysBills.length?'disabled':''}>${isMe?'Leave this group':`Move ${esc(firstName(id))} out`}</button>
           <p class="note">${b?`Settle the ${money(Math.abs(b))} balance first.`:paysBills.length?`${isMe?'You pay':'They pay'} ${paysBills.map(r=>esc(r.title)).join(', ')}. Change who pays first.`:'History stays. They’re taken out of future bills.'}</p>
           ${b && moving.length ? `<div class="card">${moving.map(p => { const w = waitingPay(gid, p); return `<div class="row"><div class="body"><div class="t">${esc(youOr(p.from))} ${verb(p.from,'pay')} ${esc(youOrLower(p.to))} <b>${money(p.amount)}</b></div>${w?`<small class="mut">Waiting for ${esc(youOrLower(p.to))} to confirm</small>`:''}</div>${w ? '' : `<button class="btn sm" data-mpay='${esc(JSON.stringify({...p, gid}))}'>Record</button>`}</div>`; }).join('')}</div>` : ''}
@@ -3120,7 +3126,8 @@ function openExpense(opts={}){
           const f2 = toCents(st.paid2), b = st.cur===HOME ? f2 : Math.min(cad-1, Math.max(1, Math.round(f2*(rate()*(1+fee()/100))))), id2 = newId('e');
           const s1 = splitShares(cad-b, split, id), s2 = {}; for(const [k,v] of Object.entries(split)) if(v-(s1[k]||0) > 0) s2[k] = v-(s1[k]||0);
           const ref2 = priv ? privDoc().collection('entries').doc(id2) : db.doc('expenses/'+id2);
-          const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact:sp}, orig: origOf(oa),
+          // the exact amounts are kept in the currency the form shows, so the entry can be edited later
+          const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact: st.cur===HOME ? sp : splitShares(oa, sp, id)}, orig: origOf(oa),
             photo: n===1 ? body.photo : null, people:[...new Set([by, ...Object.keys(sp)])], pair:{id, n, total:cad, other: n===1 ? id2 : id},
             ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now()+n-1, addedBy:myUid});
           done = await write(() => writeAll(w => { w.set(ref, part(1, st.paidBy, cad-b, s1, a-f2)); w.set(ref2, part(2, st.paidBy2, b, s2, f2)); }, `Your expense ‘${body.title||'Expense'} ${money(cad)}’`));
@@ -3152,7 +3159,12 @@ function changeLines(c, e){
   if(d.from || d.to) out.push(`${nameOf((d.from||[])[1]||e.from)} → ${nameOf((d.to||[])[1]||e.to)} (was ${nameOf((d.from||[])[0]||e.from)} → ${nameOf((d.to||[])[0]||e.to)})`);
   if(d.split){ const a = d.split[0]||{}, b = d.split[1]||{};
     const ids = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(id => (a[id]||0) !== (b[id]||0));
-    out.push(ids.length ? 'Shares: '+ids.map(id => `${youOr(id)} ${m(a[id]||0)} → ${m(b[id]||0)}`).join(', ') : 'Shares rearranged'); }
+    // a hand-over: the share logged under a name moved, amount for amount, to that person's account
+    // (made by that person, from an id that isn't an account, for the same amount)
+    const gone = ids.filter(id => !b[id]), came = ids.filter(id => !a[id]);
+    if(ids.length===2 && gone.length===1 && came.length===1 && came[0]===c.by && !S.people[gone[0]] && a[gone[0]]===b[came[0]])
+      out.push(`${youOr(c.by)} took over the share logged before ${c.by===myUid?'you':'they'} joined`);
+    else out.push(ids.length ? 'Shares: '+ids.map(id => `${youOr(id)} ${m(a[id]||0)} → ${m(b[id]||0)}`).join(', ') : 'Shares rearranged'); }
   if(d.category) out.push(`Category ${catOf(d.category[0])[2]} → ${catOf(d.category[1])[2]}`);
   if(d.note) out.push(d.note[1] ? `Note: “${d.note[1]}”` : 'Note removed');
   return out;
@@ -3245,13 +3257,21 @@ function openDetail(id, priv){
 }
 function bindDelete(sh, e){
   const ref = entryRef(e);
+  // two people paid: the bill is two entries, so they go to the bin and come back together
+  const mate = e.pair && (e._priv ? S.privEntries : S.expensesRaw).find(x => x._id===e.pair.other && x.pair?.other===e._id);
+  const both = (data, del) => mate && !!mate.deletedAt !== del
+    ? writeAll(w => { w.update(ref, data); w.update(entryRef(mate), data); }, `${del?'Removing':'Putting back'} ${e.title||'the expense'}`)
+    : ref.update(data);
   const res = sh.querySelector('#res');
-  if(res) res.onclick = async () => { if(await write(()=>ref.update({deletedAt:null, deletedBy:null}))){ closeSheet(); toast('Restored'); } };
+  if(res) res.onclick = async () => { if(await write(()=>both({deletedAt:null, deletedBy:null}, false))){ closeSheet(); toast('Restored'); } };
   const b = sh.querySelector('#del'); if(!b) return;
   b.onclick = async () => {
     if(b.dataset.armed!=='1'){ b.dataset.armed='1'; b.textContent='Tap again to delete'; return; }
-    if(await write(() => ref.update({deletedAt:Date.now(), deletedBy:myUid}))){ closeSheet();
-      toast('Moved to Recently deleted', {label:'Undo', fn:()=>write(()=>ref.update({deletedAt:null, deletedBy:null}))}); }
+    const pairNow = !!mate && !mate.deletedAt;
+    if(await write(() => both({deletedAt:Date.now(), deletedBy:myUid}, true))){ closeSheet();
+      toast(pairNow ? 'Both parts moved to Recently deleted' : 'Moved to Recently deleted', {label:'Undo', fn:()=>write(()=>pairNow
+        ? writeAll(w => { w.update(ref, {deletedAt:null, deletedBy:null}); w.update(entryRef(mate), {deletedAt:null, deletedBy:null}); }, `Putting back ${e.title||'the expense'}`)
+        : ref.update({deletedAt:null, deletedBy:null}))}); }
   };
 }
 
