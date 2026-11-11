@@ -98,12 +98,12 @@
         } catch (e) {
           if (e.code === 'unauthenticated') break;   // signed out: keep it for when they sign back in
           // The laptop can't be reached: keep it and try again later. That doesn't count against the change,
-          // unless the laptop just answered something else, so it's this change that keeps failing.
-          const busy = e.code === 'unavailable' && (!e.offline || Date.now() - lastAnswer < 30000);
-          if (e.offline && !busy) { retryLater(); break; }
+          // unless the laptop has answered something else since this change last failed, so it's this change that keeps failing.
+          const busy = e.code === 'unavailable' && (!e.offline || (item.failAt && lastAnswer > item.failAt));
+          if (e.offline && !busy) { setQueue(queue().map(x => x.id === item.id ? { ...x, failAt: Date.now() } : x)); retryLater(); break; }
           if (busy) {
             const tries = (item.tries || 0) + 1;
-            if (tries < MAX_TRIES) { setQueue(queue().map(x => x.id === item.id ? { ...x, tries } : x)); retryLater(); break; }
+            if (tries < MAX_TRIES) { setQueue(queue().map(x => x.id === item.id ? { ...x, tries, failAt: Date.now() } : x)); retryLater(); break; }
             putAside(item, 'stuck', 'It didn’t go through after several tries.', e.code);
             continue;
           }
