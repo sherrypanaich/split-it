@@ -363,6 +363,11 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       const p = privRoot(uid) + 'entries/' + id; docs()[p] = data; h.saveDb(); h.broadcast([p]); return;
     }
     const p = 'expenses/' + id, before = { [p]: docs()[p] };
+    if (h.writeOps) {   // the same path as a save from the app: rules, version, change log, notifications
+      const r = h.writeOps(uid, [{ op: 'set', path: p, data }]);
+      if (r.status !== 200) throw new Error((r.body?.error || 'That couldn’t be saved.') + ' Nothing was added.');
+      return;
+    }
     if (h.canWrite && !h.canWrite(uid, p, data)) throw new Error('You can’t add that there. Nothing was added.');
     const wrong = h.entryProblem && h.entryProblem(uid, p, before[p], data);
     if (wrong) throw new Error(wrong + ' Nothing was added.');
@@ -618,8 +623,10 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
           .sort((a, b) => b[1].createdAt - a[1].createdAt);
         if (!mine.length) return 'Nothing to undo: you haven’t added anything through an assistant in the last 10 minutes.';
         const [k, e] = mine[0];
-        docs()[k] = { ...e, deletedAt: Date.now(), deletedBy: uid };
-        h.saveDb(); h.broadcast([k]);
+        if (h.writeOps && k.startsWith('expenses/')) {   // to the bin, with a log line and a note to everyone in it
+          const r = h.writeOps(uid, [{ op: 'delete', path: k }]);
+          if (r.status !== 200) return `Couldn’t remove it: ${r.body?.error || 'the laptop refused'}.`;
+        } else { docs()[k] = { ...e, deletedAt: Date.now(), deletedBy: uid }; h.saveDb(); h.broadcast([k]); }
         return `Removed ${e.kind === 'payment' ? 'the payment of ' + cad(e.amount) + ' to ' + nameOf(e.to) : q(e.title || 'the expense') + ' (' + cad(e.amount) + ')'}. It can be restored from the bin in the app within 30 days.`;
       } }
   ];
