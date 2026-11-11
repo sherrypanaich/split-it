@@ -917,7 +917,7 @@ function nameOf(id){
   if(S.people[id]) return S.people[id].nickname || S.prof[id]?.name || 'Someone';
   const r = personRec(id); return r?.name || 'Former member';
 }
-const firstName = id => nameOf(id).split(' ')[0];
+const firstName = id => { const n = nameOf(id); return n==='Former member' ? n : n.split(' ')[0]; };   // not “Former”
 const colorOf = id => { const r = personRec(id); return r ? COLORS[(r.color||0) % COLORS.length] : '#8A87A0'; };
 const youOr = id => id === myUid ? 'You' : nameOf(id);
 const youOrLower = id => id === myUid ? 'you' : nameOf(id);
@@ -1267,6 +1267,8 @@ function render(){
   const keep = document.activeElement?.id; const qv = app.querySelector('#quickIn')?.value || '';
   let html;
   if(S.page?.type==='group') html = S.groups[S.page.id] ? viewGroup(S.page.id) : pageBar('groups','groups','Opening group…');
+  // a contact or name-only member who just took over their history (or was removed) is gone: back to the friends list
+  else if(S.page?.type==='friend' && !S.people[S.page.id] && !friendIds().includes(S.page.id)){ S.page = null; S.tab = 'friends'; html = viewFriends(); }
   else if(S.page?.type==='friend') html = viewFriend(S.page.id);
   else { S.page = null; html = ({home:viewHome, groups:viewGroups, friends:viewFriends, activity:viewActivity})[S.tab](); }
   app.innerHTML = ownerBanner() + (!canWrite ? `<div class="banner">You can look around, but you need Contributor or Editor access to add anything. ${LAPTOP?'Ask whoever runs Split it to give you access.':'Ask whoever shared this to change it in the Share menu.'}</div>` : '') + html;
@@ -1401,7 +1403,11 @@ function bind(){
   on('#gAct','onclick',el=>openGroupActivity(el.dataset.gid));
   on('#fAdd','onclick',el=>openExpense({ctx:{type:'friend',id:el.dataset.fid}}));
   on('#fSettle','onclick',el=>openFriendSettle(el.dataset.fid));
-  on('#fRemind','onclick',el=>{ const v = friendTotal(el.dataset.fid); nudge({from:el.dataset.fid, to:myUid, amount:v}); });
+  on('#fRemind','onclick',el=>{ const fid = el.dataset.fid;
+    // a payment they marked as sent counts as paid here too, as it does on the laptop
+    const sent = alive(S.expensesRaw).filter(e => e.kind==='payment' && e.confirmed===false && e.from===fid && e.to===myUid).reduce((t,e)=>t+e.amount,0), v = friendTotal(fid) - sent;
+    if(v <= 0) return toast(`${firstName(fid)} already marked it paid. Confirm it once you’ve got it`);
+    nudge({from:fid, to:myUid, amount:v}); });
   on('#fEdit','onclick',el=>openContact(el.dataset.fid));
   on('#profBtn','onclick',()=>openProfile());
   on('[data-fav]','onclick',el=>useFav(el.dataset.fav));
@@ -1944,7 +1950,7 @@ function openClaim(c){
     sh.querySelector('#no').onclick = async e => { if(!confirmTap(e.currentTarget, 'Tap again: it’s not me')) return;
       try{ await api('/api/claims/answer', { id:c.id, yes:false }); closeSheet(); toast(`Got it. We told ${c.byName}`); }catch(x){ toast(x.message); } loadInbox(true); };
     sh.querySelector('#yes').onclick = async e => { const b = e.currentTarget; b.disabled = true; b.textContent = 'Moving it…';
-      try{ await api('/api/claims/answer', { id:c.id, yes:true }); closeSheet(); celebrate('It’s all yours now'); }
+      try{ await api('/api/claims/answer', { id:c.id, yes:true }); closeSheet(); toast('It’s all yours now'); }
       catch(x){ toast(x.message); b.disabled = false; b.textContent = 'Yes, that’s me'; } loadInbox(true); };
   });
 }
@@ -3118,7 +3124,12 @@ function changeLines(c, e){
   if(d.from || d.to) out.push(`${nameOf((d.from||[])[1]||e.from)} → ${nameOf((d.to||[])[1]||e.to)} (was ${nameOf((d.from||[])[0]||e.from)} → ${nameOf((d.to||[])[0]||e.to)})`);
   if(d.split){ const a = d.split[0]||{}, b = d.split[1]||{};
     const ids = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(id => (a[id]||0) !== (b[id]||0));
-    out.push(ids.length ? 'Shares: '+ids.map(id => `${youOr(id)} ${m(a[id]||0)} → ${m(b[id]||0)}`).join(', ') : 'Shares rearranged'); }
+    // a hand-over: the share logged under a name moved, amount for amount, to that person's account
+    // (made by that person, from an id that isn't an account, for the same amount)
+    const gone = ids.filter(id => !b[id]), came = ids.filter(id => !a[id]);
+    if(ids.length===2 && gone.length===1 && came.length===1 && came[0]===c.by && !S.people[gone[0]] && a[gone[0]]===b[came[0]])
+      out.push(`${youOr(c.by)} took over the share logged before ${c.by===myUid?'you':'they'} joined`);
+    else out.push(ids.length ? 'Shares: '+ids.map(id => `${youOr(id)} ${m(a[id]||0)} → ${m(b[id]||0)}`).join(', ') : 'Shares rearranged'); }
   if(d.category) out.push(`Category ${catOf(d.category[0])[2]} → ${catOf(d.category[1])[2]}`);
   if(d.note) out.push(d.note[1] ? `Note: “${d.note[1]}”` : 'Note removed');
   return out;
