@@ -7,6 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Split it">
 <meta name="application-name" content="Split it">
+<meta name="home-currency" content="CAD">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#F5F1E8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#13111C" media="(prefers-color-scheme: dark)">
@@ -786,9 +787,12 @@ const CATS = [
 const catIcon = id => icon(catOf(id)[1]);
 const BILL_CATS = new Set(['rent','utilities','internet']);
 const catOf = id => CATS.find(c => c[0] === id) || CATS[CATS.length-1];
-const fmt = new Intl.NumberFormat('en-CA',{style:'currency',currency:'CAD'});
+// The money this install keeps everything in. The laptop sets it (HOME_CURRENCY); CAD unless changed.
+const HOME = (() => { const c = (document.querySelector('meta[name="home-currency"]')?.content||'').trim().toUpperCase(); try{ if(/^[A-Z]{3}$/.test(c)){ new Intl.NumberFormat('en-CA',{style:'currency',currency:c}); return c; } }catch(e){} return 'CAD'; })();
+const fmt = new Intl.NumberFormat('en-CA',{style:'currency',currency:HOME,currencyDisplay:'narrowSymbol'});
 const money = c => fmt.format((c||0)/100);
-const fmt0 = new Intl.NumberFormat('en-CA',{style:'currency',currency:'CAD',maximumFractionDigits:0});
+const CUR_SIGN = (fmt.formatToParts(1).find(x=>x.type==='currency')||{}).value || '$';
+const fmt0 = new Intl.NumberFormat('en-CA',{style:'currency',currency:HOME,currencyDisplay:'narrowSymbol',maximumFractionDigits:0});
 const money0 = c => fmt0.format(Math.round((c||0)/100));
 const esc = s => String(s ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 const pad = n => String(n).padStart(2,'0');
@@ -799,8 +803,13 @@ const nextYm = ym => { let [y,m]=ym.split('-').map(Number); m++; if(m>12){m=1;y+
 const prevYm = ym => { let [y,m]=ym.split('-').map(Number); m--; if(m<1){m=12;y--;} return y+'-'+pad(m); };
 const daysIn = ym => { const [y,m]=ym.split('-').map(Number); return new Date(y,m,0).getDate(); };
 const ordinal = n => n + (n%100>=11&&n%100<=13 ? 'th' : ({1:'st',2:'nd',3:'rd'}[n%10]||'th'));
-// "12,50" is 12.50 (French-style decimal comma); "1,250.00" is 1250 (thousands comma).
-const toCents = v => { let t = String(v).trim(); t = /^\$?\s*\d+,\d{1,2}$/.test(t) ? t.replace(',', '.') : t.replace(/,/g,''); const n = parseFloat(t.replace(/[^0-9.]/g,'')); return isFinite(n) ? Math.round(n*100) : 0; };
+// Amount boxes take plain amounts only: 12, 12.5, $12, 1234.56, 1,234.56, or a decimal comma "12,50" (12.50).
+// Anything else ("1.234,56", "10-15", "12.345", "1 234") is refused instead of guessed: plainCents gives null,
+// toCents gives 0 so nothing can be saved, and amtBad/amtMsg say why next to the box.
+const plainCents = v => { let t = String(v??'').trim().replace(/^[$€£₹]\s*/,''); if(!t) return 0; if(/^\d+,\d{1,2}$/.test(t)) t = t.replace(',','.'); else if(/^(\d+|\d{1,3}(,\d{3})+)(\.\d{0,2})?$|^\.\d{1,2}$/.test(t)) t = t.replace(/,/g,''); else return null; const [w,f=''] = t.split('.'); return w.length > 10 ? null : Number(w||0)*100 + Number((f+'00').slice(0,2)); };
+const toCents = v => plainCents(v) || 0;
+const amtBad = v => plainCents(v) === null;
+const amtMsg = v => `“${String(v).trim().slice(0,16)}” isn’t a plain amount. Type it like 1234.56 or 1,234.56.`;
 const monthLabel = (ym, short) => { const [y,m]=ym.split('-').map(Number); return new Date(y,m-1,1).toLocaleDateString('en-CA',short?{month:'short'}:{month:'long',year:'numeric'}); };
 const monthName = ym => monthLabel(ym).split(' ')[0];
 const dayLabel = d => { if(!d) return ''; if(d===today()) return 'Today'; const y=new Date(); y.setDate(y.getDate()-1);
@@ -1319,6 +1328,7 @@ function bind(){
   on('[data-exp]','onclick',el=>openDetail(el.dataset.exp, el.dataset.priv==='1'));
   on('[data-bill]','onclick',el=>openBill(el.dataset.bill));
   on('[data-fill]','onclick',el=>fillAmount(el.dataset.fill));
+  on('[data-takeover]','onclick',el=>{ const [rid, heir] = el.dataset.takeover.split('|'); el.disabled = true; takeOver(rid, heir||null); });
   on('[data-confirm]','onclick',el=>confirmReceived(el.dataset.confirm, el.dataset.ok==='1'));
   on('#newsOk','onclick',()=>{ try{ localStorage.setItem('hs.news', NEWS.v); }catch(e){} render(); });
   on('#confirmAll','onclick',async el=>{ if(!confirmTap(el, 'Tap again to confirm all')) return; const ids = el.dataset.ids.split(',').filter(id => alive(S.expensesRaw).some(x=>x._id===id && x.to===myUid && x.confirmed===false));
@@ -1896,6 +1906,7 @@ function viewGroup(gid){
   const np = nextPayer(gid);
   if(np) h += `<div class="ctxbar turnbar" style="margin-top:12px">${np.even ? `<span>${icon('star','tiny')}</span><span>Everyone’s about even. Anyone can pay next.</span>`
     : `${av(np.id,'sm',gid)}<span><b>${esc(np.id===myUid?'Your':firstName(np.id)+'’s')} turn to pay</b> <span class="mut">${np.id===myUid?'You’ve':'They’ve'} covered ${money(np.behind)} less than ${np.id===myUid?'your':'their'} share of everyday buys lately.</span></span>`}</div>`;
+  h += takeoverCard(gid);
   const todo = needsYou(gid);
   if(todo.length) h += `<div class="sec-h"><h2>Needs you</h2></div><div class="card">${todo.join('')}</div>`;
   const simp = g.simplify !== false;
@@ -2170,11 +2181,14 @@ function openGroupEditor(gid){
       <div id="dsBox" ${g.defaultSplit?.mode==='shares'?'':'hidden'}><div class="split">${activeIn(gid).map(m=>`<div class="srow">${av(m.id,'sm',gid)}<span class="nm">${esc(youOr(m.id))}</span><input class="in num" inputmode="numeric" data-dsw="${esc(m.id)}" value="${g.defaultSplit?.input?.shares?.[m.id]??1}" style="width:5em;text-align:right" aria-label="Shares for ${esc(nameOf(m.id))}"></div>`).join('')}</div>
         <p class="note">Rooms, couples and kids: give each person a weight. New expenses start with it; anyone can still change the split on one expense.</p></div>
       <label class="f">Monthly budgets (optional)</label>
-      <div class="split">${['groceries','food','household','drinks','transport','fun','other'].map(c=>`<div class="srow"><span class="nm">${catIcon(c)} ${catOf(c)[2]}</span><span class="amount-wrap" style="padding:0 8px;min-width:7em"><span>$</span><input inputmode="numeric" data-bud="${c}" placeholder="—" value="${g.budgets?.[c]?Math.round(g.budgets[c]/100):''}" aria-label="${catOf(c)[2]} budget" style="width:4.5em;border:0;background:none;text-align:right"></span></div>`).join('')}</div>
+      <div class="split">${['groceries','food','household','drinks','transport','fun','other'].map(c=>`<div class="srow"><span class="nm">${catIcon(c)} ${catOf(c)[2]}</span><span class="amount-wrap" style="padding:0 8px;min-width:7em"><span>${CUR_SIGN}</span><input inputmode="numeric" data-bud="${c}" placeholder="—" value="${g.budgets?.[c]?Math.round(g.budgets[c]/100):''}" aria-label="${catOf(c)[2]} budget" style="width:4.5em;border:0;background:none;text-align:right"></span></div>`).join('')}</div>
       <p class="note">A quiet nudge at 80% and again when it’s used up. Leave blank for no budget.</p>
       <label class="f" for="gcur">Currency you mostly pay in</label>
-      <select class="in" id="gcur">${CURRENCIES.map(c=>`<option ${c===(g.cur||'CAD')?'selected':''}>${c}</option>`).join('')}</select>
-      <p class="note">For a trip abroad. New expenses here start in that currency and are turned into CAD at the day’s rate, so balances stay in CAD. You can still change it on any expense.</p>
+      <select class="in" id="gcur">${CURRENCIES.map(c=>`<option ${c===(g.cur||HOME)?'selected':''}>${c}</option>`).join('')}</select>
+      <p class="note">For a trip abroad. New expenses here start in that currency and are turned into ${HOME} at the day’s rate, so balances stay in ${HOME}. You can still change it on any expense.</p>
+      <div id="gfeeBox" ${(g.cur||HOME)===HOME?'hidden':''}><label class="f" for="gfee">Card fee %</label>
+        <div class="amount-wrap" style="max-width:9em"><input id="gfee" inputmode="decimal" value="${esc(String(g.cardFee ?? 2.5))}" aria-describedby="gfeeN"><span>%</span></div>
+        <p class="note" id="gfeeN">Cards charge about 2.5% on top of the bank rate, so whoever paid by card gets it back. Use 0 if you pay cash or have a card with no fee.</p></div>
       <label class="toggle"><input type="checkbox" id="arch" ${g.archived?'checked':''}><span><b>Archive this group</b><small>Hides it from Home. Balances still count.</small></span></label>
       ${downloads?`<button class="btn block" id="gx" style="margin-top:12px">Export to a spreadsheet</button>`:''}
       <button class="btn block" id="gImport" style="margin-top:8px">Import from Splitwise (CSV)</button>
@@ -2192,6 +2206,7 @@ function openGroupEditor(gid){
     sh.querySelector('#ggAdd').onclick = addG; sh.querySelector('#gg').onkeydown = e => { if(e.key==='Enter'){ e.preventDefault(); addG(); } };
     press();
     sh.querySelectorAll('[data-simp]').forEach(b => b.onclick = () => sh.querySelectorAll('[data-simp]').forEach(x=>x.setAttribute('aria-pressed', x===b)));
+    const gcur = sh.querySelector('#gcur'); if(gcur) gcur.onchange = () => { sh.querySelector('#gfeeBox').hidden = gcur.value===HOME; };
     const gx = sh.querySelector('#gx'); if(gx) gx.onclick = () => exportCsv(gid);
     const gi = sh.querySelector('#gImport'); if(gi) gi.onclick = () => openImport(gid);
     const gsum = sh.querySelector('#gSummary'); if(gsum) gsum.onclick = () => openSummary(gid);
@@ -2199,6 +2214,8 @@ function openGroupEditor(gid){
     sh.querySelector('#sv').onclick = async () => {
       const name = sh.querySelector('#gn').value.trim().slice(0,40); if(!name){ toast('Give the group a name'); return; }
       if(isNew && !st.add.size && !st.guests.length){ toast('Add at least one other person'); return; }
+      const feeIn = sh.querySelector('#gfee'), fee = feeIn ? parseFloat(String(feeIn.value).replace(',','.')) : 2.5;
+      if(feeIn && sh.querySelector('#gcur').value!==HOME && !(fee>=0 && fee<=20)){ toast('Card fee has to be between 0 and 20%'); feeIn.focus(); return; }
       sh.querySelector('#sv').disabled = true;
       const id = gid || newId('g'), now = Date.now();
       const usedColors = new Set(groupMembers(id).map(m=>colorOf(m.id)));
@@ -2208,7 +2225,7 @@ function openGroupEditor(gid){
           const byShares = sh.querySelector('[data-ds="shares"]').getAttribute('aria-pressed')==='true', shares = {};
           sh.querySelectorAll('[data-dsw]').forEach(i => { const v = Math.max(0, Math.round(+i.value||0)); if(v) shares[i.dataset.dsw] = v; });
           const budgets = {}; sh.querySelectorAll('[data-bud]').forEach(i => { const v = Math.round((parseFloat(i.value)||0)*100); if(v>0) budgets[i.dataset.bud] = v; });
-          await db.doc('groups/'+id).update({name, emoji:st.emoji, simplify: sh.querySelector('[data-simp="1"]').getAttribute('aria-pressed')==='true', archived: sh.querySelector('#arch').checked, cur: sh.querySelector('#gcur').value==='CAD' ? null : sh.querySelector('#gcur').value,
+          await db.doc('groups/'+id).update({name, emoji:st.emoji, simplify: sh.querySelector('[data-simp="1"]').getAttribute('aria-pressed')==='true', archived: sh.querySelector('#arch').checked, cur: sh.querySelector('#gcur').value===HOME ? null : sh.querySelector('#gcur').value, cardFee: sh.querySelector('#gcur').value===HOME ? null : Math.round(fee*100)/100,
             defaultSplit: byShares && Object.keys(shares).length ? {mode:'shares', input:{shares}} : null, budgets: Object.keys(budgets).length ? budgets : null});
         }
         if(isNew) await db.doc(`groups/${id}/members/${myUid}`).set({kind:'account', active:true, joinedAt:now, addedBy:myUid});
@@ -2257,8 +2274,9 @@ function openMember(gid, id){
       if(await write(()=>db.doc(`groups/${gid}/members/${id}`).update({name:v, color}))){ closeSheet(); toast('Saved'); } };
     sh.querySelectorAll('[data-linkto]').forEach(x => x.onclick = () => linkGuest(gid, id, x.dataset.linkto));
     const out = sh.querySelector('#out');
-    if(out) out.onclick = async () => {
-      if(await write(()=>db.doc(`groups/${gid}/members/${id}`).update({active:false, leftAt:Date.now()}))){ closeSheet(); toast(isMe?'You left the group':firstName(id)+' moved out'); stripFromBills(gid, id); if(isMe) go('groups'); } };
+    // out of the bills first, then out of the group: the laptop pauses any bill they're still in and asks who takes over
+    if(out) out.onclick = async () => { out.disabled = true; await stripFromBills(gid, id);
+      if(await write(()=>db.doc(`groups/${gid}/members/${id}`).update({active:false, leftAt:Date.now()}))){ closeSheet(); toast(isMe?'You left the group':firstName(id)+' moved out'); if(isMe) go('groups'); } else out.disabled = false; };
     sh.querySelectorAll('[data-mpay]').forEach(x => x.onclick = () => { const p = JSON.parse(x.dataset.mpay); confirmPay(p, {type:'group', id:gid}); });
     sh.querySelectorAll('[data-heir]').forEach(x => x.onclick = async () => { const to = x.dataset.heir; let ok = true;
       for(const r of paysBills) ok = ok && await write(()=>db.doc('recurring/'+r._id).update({paidBy:to}), true);
@@ -2312,6 +2330,30 @@ async function stripFromBills(gid, id){
     if(inp.exact?.[id]){ toast(`Check ${r.title}: it had a set amount for ${nameOf(id)}`); continue; }
     if(changed) await write(()=>db.doc('recurring/'+r._id).update({splitInput:inp, splitMode:r.splitMode}), true);
   }
+}
+
+// Someone left while still in a bill: the laptop paused it (bill.takeover). The group picks who takes over,
+// or splits it between the rest, and the bill carries on, catching up on anything that came due meanwhile.
+function takeoverCard(gid){
+  const bills = groupBills(gid).filter(r => r.takeover && r.paused); if(!bills.length) return '';
+  const heirs = activeIn(gid).map(m=>m.id).filter(u => !bills.every(r => r.takeover.who===u));
+  return `<div class="banner" style="margin-top:12px" role="status">${bills.map(r => { const who = r.takeover.who, paid = r.paidBy===who;
+    return `<div style="margin-top:4px"><b>${esc(firstName(who))} left, so ${esc(r.title||'a bill')} is paused.</b> Who takes over ${paid?'paying it':esc(firstName(who))+'’s share'}?</div>
+      ${canWrite?`<div class="chips" style="margin:6px 0 4px">${heirs.filter(u=>u!==who).map(u=>`<button class="chip sm" data-takeover="${esc(r._id)}|${esc(u)}">${av(u,'sm',gid)}${esc(youOr(u))}</button>`).join('')}${paid?'':`<button class="chip sm" data-takeover="${esc(r._id)}|">Split it between the rest</button>`}</div>`:''}`; }).join('')}</div>`;
+}
+async function takeOver(rid, heir){
+  const r = S.recurringRaw.find(x=>x._id===rid); if(!r?.takeover) return;
+  const who = r.takeover.who, old = r.splitInput || {}, inp = JSON.parse(JSON.stringify(old)); let splitMode = r.splitMode || 'equal';
+  if(Array.isArray(inp.ids) && inp.ids.includes(who)){
+    inp.ids = inp.ids.filter(x=>x!==who);
+    if(heir && !inp.ids.includes(heir)) inp.ids.push(heir);
+    else if(heir){ splitMode = 'shares'; inp.shares = Object.fromEntries(inp.ids.map(x=>[x, x===heir?2:1])); delete inp.ids; }   // they already had a share: now they have two
+  }
+  for(const k of ['shares','pct']) if(inp[k] && who in inp[k]){ const v = inp[k][who]; delete inp[k][who]; if(heir) inp[k][heir] = (inp[k][heir]||0) + v; }
+  if(!Object.keys(computeSplit(100000, splitMode, inp, 'x')).length){ toast('Pick someone to take it over'); return; }
+  const upd = { splitMode, splitInput:inp, takeover:null, paused:!!r.takeover.wasPaused, editedBy:myUid, ...(r.paidBy===who ? {paidBy:heir} : {}) };
+  if(r.paidBy===who && !heir) return;
+  if(await write(()=>db.doc('recurring/'+rid).update(upd))){ toast(heir ? `${youOr(heir)} ${heir===myUid?'take':'takes'} over ${r.title||'the bill'}` : `${r.title||'The bill'} is split between the rest now`); postDueBills(); }
 }
 
 /* ================= FRIENDS: add / edit contacts ================= */
@@ -2387,20 +2429,31 @@ function ctxMembers(ctx, involved){
   return [myUid, ...ctxIds(ctx)];
 }
 const ctxTitle = ctx => ctx.type==='group' ? `${S.groups[ctx.id]?.name||'Group'}` : ctx.type==='friends' ? 'You, '+namesList(ctx.ids) : nameOf(ctx.id);
-const CURRENCIES = ['CAD','USD','EUR','GBP','INR','MXN','AUD'];
-const fmtCur = (c, cur) => (cur && cur!=='CAD') ? new Intl.NumberFormat('en-CA',{style:'currency',currency:cur}).format((c||0)/100) : money(c);
+const CURRENCIES = [...new Set([HOME, 'CAD','USD','EUR','GBP','INR','MXN','AUD'])];
+const fmtCur = (c, cur) => (cur && cur!==HOME) ? new Intl.NumberFormat('en-CA',{style:'currency',currency:cur}).format((c||0)/100) : money(c);
 const rememberedRate = cur => { try{ return localStorage.getItem('hs.rate.'+cur)||''; }catch(e){ return ''; } };
-// Today's rate from frankfurter.app (European Central Bank data, free). Cached for the day; falls back to the last rate used.
+// Rates come from the laptop, which fetches them once a day for everyone (European Central Bank data via frankfurter.app)
+// and keeps the last good ones when that service is down. -> {rate, date, stale} or null. Without the laptop
+// (the Claude preview) the page asks frankfurter.app itself, as before.
+let ratesP = null, ratesAt = 0;
 async function liveRate(cur){
-  if(cur==='CAD') return 1;
+  if(cur===HOME) return {rate:1, date:today(), stale:false};
+  if(LAPTOP){
+    if(!ratesP || Date.now()-ratesAt > 3600e3){ ratesAt = Date.now(); ratesP = fetch('/api/rates').then(r => r.ok ? r.json() : null).catch(() => null); }
+    const d = await ratesP; if(!d) ratesP = null;
+    const rate = +d?.rates?.[cur];
+    return rate > 0 ? {rate, date:d.date, stale:!!d.stale} : null;
+  }
   const k = 'hs.fx.'+cur, hit = (() => { try{ return JSON.parse(localStorage.getItem(k)||'null'); }catch(e){ return null; } })();
-  if(hit && hit.day === today()) return hit.rate;
+  if(hit && hit.day === today()) return {rate:hit.rate, date:hit.date, stale:false};
   const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 4000);
-  try{ const r = await fetch(`https://api.frankfurter.app/latest?from=${cur}&to=CAD`, {signal:ctl.signal}); const d = await r.json(); const rate = +d?.rates?.CAD;
-    if(rate > 0){ lsSet(k, JSON.stringify({day:today(), rate, date:d.date})); return rate; } }catch(e){}
+  try{ const r = await fetch(`https://api.frankfurter.app/latest?from=${cur}&to=${HOME}`, {signal:ctl.signal}); const d = await r.json(); const rate = +d?.rates?.[HOME];
+    if(rate > 0){ lsSet(k, JSON.stringify({day:today(), rate, date:d.date})); return {rate, date:d.date, stale:false}; } }catch(e){}
   finally{ clearTimeout(t); }
-  return null;
+  return hit ? {rate:hit.rate, date:hit.date, stale:true} : null;
 }
+// The card fee a group adds when it converts: its own setting on a trip (2.5% unless changed), none elsewhere.
+const groupFee = g => g?.cur && g.cur!==HOME ? Number(g.cardFee ?? 2.5) : 0;
 const rememberRate = (cur, r) => { try{ localStorage.setItem('hs.rate.'+cur, String(r)); }catch(e){} };
 const CAT_WORDS = [['groceries',/grocer|costco|walmart|no ?frills|food ?basics|metro|loblaw|freshco|sobeys|farm ?boy|superstore|fruit|milk/],['rent',/\brent\b|landlord/],
   ['utilities',/hydro|electric|gas bill|water|enbridge|utility/],['internet',/internet|wi-?fi|rogers|bell|telus|fido|phone bill|netflix|spotify|disney|crave|subscription/],
@@ -2421,11 +2474,12 @@ function openExpense(opts={}){
   const act = isGroup ? activeIn(ctx.id).map(m=>m.id) : mem;
   const st = { paidBy: myUid, cat: opts.asBill?'rent':(isGroup?'groceries':'food'), mode:'equal', ids:new Set(act),
     shares:Object.fromEntries(mem.map(id=>[id,1])), pct:Object.fromEntries(mem.map((id,i)=>[id, i===mem.length-1 ? +(100 - +(100/mem.length).toFixed(2)*(mem.length-1)).toFixed(2) : +(100/mem.length).toFixed(2)])), exact:{},
-    items:[], tax:'', tip:'', cur:'CAD', rate:'', repeat:!!opts.asBill && isGroup, every: bill?.every || 'month', variable:false, amount:'', title:'', date:today(), note:'', dupOk:false, photo: ex?.photo || null, refund: !!opts.refund, two:false, paidBy2:null, paid2:'' };
+    items:[], tax:'', tip:'', cur:HOME, rate:'', fee:0, rateInfo:null, repeat:!!opts.asBill && isGroup, every: bill?.every || 'month', variable:false, amount:'', title:'', date:today(), note:'', dupOk:false, photo: ex?.photo || null, refund: !!opts.refund, two:false, paidBy2:null, paid2:'' };
   const g0 = isGroup ? S.groups[ctx.id] : null;
   if(g0?.defaultSplit && !src && !bill && !opts.prefill?.ids && !opts.prefill?.exact) { st.mode = g0.defaultSplit.mode || 'equal'; if(st.mode==='shares') st.shares = Object.fromEntries(mem.map(id=>[id, g0.defaultSplit.input?.shares?.[id]||0])); if(st.mode==='pct') st.pct = Object.fromEntries(mem.map(id=>[id, g0.defaultSplit.input?.pct?.[id]||0])); if(st.mode==='equal' && g0.defaultSplit.input?.ids?.length) st.ids = new Set(g0.defaultSplit.input.ids.filter(id=>mem.includes(id))); }
   // a group on a trip: new expenses start in the trip's currency
-  const tripCur = g0?.cur && CURRENCIES.includes(g0.cur) && g0.cur!=='CAD' && !src && !bill && !opts.asBill && !opts.prefill?.repeat && !opts.prefill?.cur ? g0.cur : null;
+  st.fee = groupFee(g0);
+  const tripCur = g0?.cur && CURRENCIES.includes(g0.cur) && g0.cur!==HOME && !src && !bill && !opts.asBill && !opts.prefill?.repeat && !opts.prefill?.cur ? g0.cur : null;
   if(tripCur){ st.cur = tripCur; st.rate = rememberedRate(tripCur); }
   const c2s = c => c ? (c/100).toFixed(2) : '';
   const loadRule = (mode, input) => {
@@ -2437,13 +2491,13 @@ function openExpense(opts={}){
     if(st.mode==='items'){ st.items = (input?.items||[]).map(it=>({n:it.n||'', p:c2s(it.p), ids:new Set((it.ids||[]).filter(id=>mem.includes(id)))})); st.tax = c2s(input?.tax); st.tip = c2s(input?.tip); }
   };
   if(src){ Object.assign(st,{paidBy:src.paidBy,cat:src.category,amount:c2s(Math.abs(src.orig?src.orig.amount:src.amount)),refund:src.amount<0,title:src.title,date:copyOf?today():src.date,note:src.note||''});
-    if(src.orig){ st.cur = src.orig.cur; st.rate = String(src.orig.rate); }
+    if(src.orig){ st.cur = src.orig.cur; st.rate = String(src.orig.rate); st.fee = src.orig.fee || 0; }
     loadRule(src.splitMode, src.splitInput); }
   if(bill){ const nd = nextDue(bill);
     Object.assign(st,{paidBy:bill.paidBy,cat:bill.category,amount:bill.variable?'':c2s(bill.amount),title:bill.title,repeat:true,variable:!!bill.variable, date: nd.s});
     loadRule(bill.splitMode, bill.splitInput); }
   if(pre){ Object.assign(st,{cat:pre.cat||st.cat, amount:c2s(pre.amount), title:pre.title||'', date:pre.date||today(), note:pre.note||'', repeat:!!pre.repeat && isGroup}); if(pre.photo) st.photo = pre.photo;
-    if(pre.cur && CURRENCIES.includes(pre.cur) && pre.cur!=='CAD'){ st.cur = pre.cur; st.rate = rememberedRate(pre.cur); }
+    if(pre.cur && CURRENCIES.includes(pre.cur) && pre.cur!==HOME){ st.cur = pre.cur; st.rate = rememberedRate(pre.cur); }
     if(pre.paidBy && mem.includes(pre.paidBy)) st.paidBy = pre.paidBy;
     const who = (pre.ids||[]).filter(id=>mem.includes(id));
     if(pre.items && pre.items.length){ st.mode='items'; st.items = pre.items.map(it=>({n:it.n, p:c2s(it.p), ids:new Set(who.length?who:act)})); st.tax = c2s(pre.tax); st.tip = c2s(pre.tip); }
@@ -2456,7 +2510,9 @@ function openExpense(opts={}){
     <div class="ctxbar"><span class="mut">With</span><b class="ell">${esc(ctxTitle(ctx))}</b>${!ex&&!bill?'<button class="link" id="chg">Change</button>':''}</div>
     <div id="amtBlock"><label class="f" for="amt">Amount</label>
       <div class="amount-wrap"><select id="cur" aria-label="Currency" class="cursel">${CURRENCIES.map(c=>`<option ${c===st.cur?'selected':''}>${c}</option>`).join('')}</select><input id="amt" inputmode="decimal" placeholder="0.00" autocomplete="off" value="${esc(st.amount)}"></div>
-      <div class="raterow" id="rateRow"><span>1 <b id="rcur"></b> =</span><input id="rate" inputmode="decimal" placeholder="1.39" value="${esc(st.rate)}" aria-label="Exchange rate"><span>CAD</span><b class="mut" id="conv"></b></div></div>
+      <div class="raterow" id="rateRow"><span>1 <b id="rcur"></b> =</span><input id="rate" inputmode="decimal" placeholder="1.39" value="${esc(st.rate)}" aria-label="Exchange rate"><span>${HOME}</span><b class="mut" id="conv"></b></div>
+      <div class="raterow" id="feeRow"><label for="fee">Card fee</label><input id="fee" inputmode="decimal" value="${esc(String(st.fee))}" style="width:64px"><span>%</span><span class="mut">Use 0 for cash</span></div>
+      <p class="note" id="rateNote" hidden style="margin:6px 2px 0"></p></div>
     <label class="f" for="ttl">What’s it for?</label><input class="in" id="ttl" placeholder="${st.repeat?'Rent, hydro, internet…':isGroup?'Costco run, dish soap…':'Dinner, Uber, concert tickets…'}" maxlength="60" autocomplete="off" value="${esc(st.title)}">
     <p class="note lasthint" id="lastHint" hidden></p>
     <label class="f">Category</label><div class="chips" id="catChips">${(() => { const used = {}; alive(ctxEntries(ctx)).forEach(e => { if(e.category) used[e.category] = (used[e.category]||0) + 1; });
@@ -2467,7 +2523,7 @@ function openExpense(opts={}){
     <label class="f" id="pbl">${st.refund?'Who got the money':'Paid by'}</label><div class="chips">${mem.map(id=>`<button class="chip" data-pb="${esc(id)}">${av(id,'sm',isGroup?ctx.id:null)}<span class="ell" style="max-width:8em">${esc(nameIn(id))}</span></button>`).join('')}</div>
     ${!ex && mem.length>1 ? `<div id="twoBox"><button class="link" id="twoOn" type="button" style="margin-top:8px">Two people paid</button>
       <div id="twoIn" hidden><label class="f">Who else paid</label><div class="chips">${mem.map(id=>`<button class="chip" data-pb2="${esc(id)}">${av(id,'sm',isGroup?ctx.id:null)}<span class="ell" style="max-width:8em">${esc(nameIn(id))}</span></button>`).join('')}</div>
-        <label class="f" for="paid2" id="paid2l">How much of it did they pay</label><div class="amount-wrap"><span id="paid2c">$</span><input id="paid2" inputmode="decimal" placeholder="0.00" autocomplete="off"></div>
+        <label class="f" for="paid2" id="paid2l">How much of it did they pay</label><div class="amount-wrap"><span id="paid2c">${CUR_SIGN}</span><input id="paid2" inputmode="decimal" placeholder="0.00" autocomplete="off"></div>
         <p class="note" id="twoNote">It’s saved as two entries, one for each person who paid, with everyone’s share divided between them.</p></div></div>` : ''}
     <label class="f" for="dt" id="dtl"></label><input class="in" id="dt" type="date" value="${esc(st.date)}">
     <label class="f">Split</label><p class="note likehint" id="likeHint" hidden style="margin:-4px 2px 10px"></p>
@@ -2486,8 +2542,12 @@ function openExpense(opts={}){
     const $ = s => sh.querySelector(s);
     const itemsSum = () => st.items.reduce((s,it)=>s+toCents(it.p),0);
     const foreignAmt = () => st.repeat && st.variable ? 0 : st.mode==='items' ? itemsSum() + toCents(st.tax) + toCents(st.tip) : toCents($('#amt').value);
-    const rate = () => st.cur==='CAD' ? 1 : (parseFloat(String($('#rate').value).replace(',', '.'))||0);
-    const cadAmt = () => st.cur==='CAD' ? foreignAmt() : Math.round(foreignAmt()*rate());
+    const rate = () => st.cur===HOME ? 1 : (parseFloat(String($('#rate').value).replace(',', '.'))||0);
+    const fee = () => { const f = parseFloat(String($('#fee').value).replace(',', '.')); return st.cur===HOME || !(f > 0) ? 0 : f; };
+    const feeBad = () => st.cur!==HOME && String($('#fee').value).trim()!=='' && !(parseFloat(String($('#fee').value).replace(',', '.')) >= 0 && parseFloat(String($('#fee').value).replace(',', '.')) <= 20);
+    // amount × rate × (1 + card fee), rounded to the cent: the assistant (mcp.js) uses the very same sum
+    const cadAmt = () => st.cur===HOME ? foreignAmt() : Math.round(foreignAmt()*(rate()*(1+fee()/100)));
+    const origOf = amt => st.cur===HOME ? null : {cur:st.cur, amount:amt, rate:rate(), fee:fee(), ...(st.rateInfo?.date && st.rateInfo.rate.toFixed(4)===String($('#rate').value).trim() ? {rateDate:st.rateInfo.date} : src?.orig?.rateDate && src.orig.cur===st.cur && +src.orig.rate===rate() ? {rateDate:src.orig.rateDate} : {})};
     const input = () => st.mode==='equal' ? {ids:mem.filter(id=>st.ids.has(id))}
       : st.mode==='shares' ? {shares:Object.fromEntries(Object.entries(st.shares).filter(([,v])=>v>0))}
       : st.mode==='pct' ? {pct:Object.fromEntries(Object.entries(st.pct).filter(([,v])=>v>0))}
@@ -2497,14 +2557,20 @@ function openExpense(opts={}){
     function check(){
       const a = foreignAmt(), inp = input(), sp = computeSplit(previewAmt(), st.mode, inp, 'preview'), n = Object.keys(sp).length, sum = sumOf(sp);
       if(st.mode==='items') $('#amt').value = a ? (a/100).toFixed(2) : '';
-      $('#rateRow').hidden = st.cur==='CAD'; $('#rcur').textContent = st.cur;
-      $('#conv').textContent = st.cur!=='CAD' && a && rate() ? '= '+money(cadAmt()) : '';
+      $('#rateRow').hidden = $('#feeRow').hidden = st.cur===HOME; $('#rcur').textContent = st.cur;
+      $('#conv').textContent = st.cur!==HOME && a && rate() ? '= '+money(cadAmt())+(fee()?` with the ${fee()}% card fee`:'') : '';
+      const rn = $('#rateNote'), ri = st.rateInfo; rn.hidden = st.cur===HOME || !ri;
+      if(!rn.hidden) rn.textContent = ri.none ? `Couldn’t get a rate for ${st.cur}. Type how many ${HOME} one ${st.cur} is worth.` : `Rate from ${dayLabel(ri.date)||ri.date}${ri.stale?'. The rate service isn’t answering, so this is the last one we got. Check it before saving.':', European Central Bank.'}`;
       mem.forEach(id => { const el = sh.querySelector(`[data-share="${CSS.escape(id)}"]`); if(el) el.textContent = !sp[id] ? '—' : (st.repeat&&st.variable) ? Math.round(sp[id]/previewAmt()*100)+'%' : fmtCur(sp[id], st.cur); });
       let msg='', bad=false;
       const pctSum = Object.values(inp.pct||{}).reduce((s,v)=>s+v,0);
-      if((st.mode==='exact'||st.mode==='items') && st.repeat){ msg='Bills can be split equally, by shares or by %.'; bad=true; }
-      else if(st.cur!=='CAD' && st.repeat){ msg='Bills are in CAD.'; bad=true; }
-      else if(st.cur!=='CAD' && !rate()){ msg=`Enter how many CAD one ${st.cur} is worth.`; bad=true; }
+      const typedAmts = [...(st.mode==='items' ? [...st.items.map(it=>it.p), st.tax, st.tip] : (st.repeat&&st.variable) ? [] : [$('#amt').value]), ...(st.two && !st.repeat && !st.refund ? [st.paid2] : [])];
+      const badAmt = typedAmts.find(amtBad);
+      if(badAmt!==undefined){ msg = amtMsg(badAmt); bad=true; }
+      else if((st.mode==='exact'||st.mode==='items') && st.repeat){ msg='Bills can be split equally, by shares or by %.'; bad=true; }
+      else if(st.cur!==HOME && st.repeat){ msg=`Bills are in ${HOME}.`; bad=true; }
+      else if(st.cur!==HOME && !rate()){ msg=`Enter how many ${HOME} one ${st.cur} is worth.`; bad=true; }
+      else if(feeBad()){ msg='The card fee has to be between 0 and 20%.'; bad=true; }
       else if(st.mode==='items' && st.items.some(it=>toCents(it.p) && !it.ids.size)){ msg='Every item needs at least one person.'; bad=true; }
       else if(st.mode==='items' && !itemsSum()){ msg='Add the items and their prices.'; }
       else if(!a && !(st.repeat&&st.variable)) msg='Enter an amount to see everyone’s share.';
@@ -2560,7 +2626,7 @@ function openExpense(opts={}){
     function syncRepeat(){
       if($('#varWrap')) $('#varWrap').hidden = !st.repeat; if($('#everyWrap')) $('#everyWrap').hidden = !st.repeat; $('#amtBlock').hidden = st.repeat && st.variable;
       if(st.repeat && (st.mode==='items'||st.mode==='exact')) st.mode='equal';
-      if(st.repeat){ st.cur='CAD'; $('#cur').value='CAD'; } $('#cur').disabled = st.repeat;
+      if(st.repeat){ st.cur=HOME; $('#cur').value=HOME; } $('#cur').disabled = st.repeat;
       if($('#refWrap')){ $('#refWrap').hidden = st.repeat; if(st.repeat) st.refund = false; $('#moneyIn').setAttribute('aria-pressed', st.refund); $('#refNote').hidden = !st.refund; $('#pbl').textContent = st.refund ? 'Who got the money' : 'Paid by'; }
       $('#dtl').textContent = st.repeat ? (bill ? 'Next due date (repeats from this day)' : 'First due date') : 'Date';
       if(st.drawTwo) st.drawTwo();
@@ -2574,7 +2640,7 @@ function openExpense(opts={}){
     sh.querySelectorAll('[data-pb]').forEach(b=>b.onclick=()=>{st.paidBy=b.dataset.pb;press('data-pb',st.paidBy);check();});
     if($('#twoOn')){
       const drawTwo = () => { $('#twoIn').hidden = !st.two; $('#twoOn').textContent = st.two ? 'Only one person paid' : 'Two people paid';
-        $('#twoBox').hidden = st.repeat || st.refund; $('#paid2c').textContent = st.cur==='CAD' ? '$' : st.cur;
+        $('#twoBox').hidden = st.repeat || st.refund; $('#paid2c').textContent = st.cur===HOME ? CUR_SIGN : st.cur;
         $('#paid2l').textContent = st.paidBy2 ? `How much of it did ${firstName(st.paidBy2)} pay` : 'How much of it did they pay'; press('data-pb2', st.paidBy2); };
       $('#twoOn').onclick = () => { st.two = !st.two; drawTwo(); check(); if(st.two && st.paidBy2) $('#paid2').focus(); };
       sh.querySelectorAll('[data-pb2]').forEach(b=>b.onclick=()=>{ st.paidBy2=b.dataset.pb2; drawTwo(); check(); });
@@ -2586,10 +2652,13 @@ function openExpense(opts={}){
       if(q==='theyowe'){ st.paidBy=myUid; st.mode='equal'; st.ids=new Set([ctx.id]); }
       if(q==='iowe'){ st.paidBy=ctx.id; st.mode='equal'; st.ids=new Set([myUid]); }
       press('data-pb',st.paidBy); drawRows(); });
-    $('#cur').onchange = async () => { st.cur = $('#cur').value; if(st.drawTwo) st.drawTwo(); if(st.cur!=='CAD' && !$('#rate').value) $('#rate').value = rememberedRate(st.cur); check();
-      if(st.cur!=='CAD' && !st.repeat){ const cur = st.cur, live = await liveRate(cur); if(live && st.cur===cur && sh.isConnected){ $('#rate').value = live.toFixed(4); $('#rate').title = 'Today’s rate (European Central Bank, via frankfurter.app)'; check(); } else if(!$('#rate').value) $('#rate').focus(); } };
+    $('#cur').onchange = async () => { st.cur = $('#cur').value; st.rateInfo = null; if(st.drawTwo) st.drawTwo(); if(st.cur!==HOME && !$('#rate').value) $('#rate').value = rememberedRate(st.cur); check();
+      if(st.cur!==HOME && !st.repeat){ const cur = st.cur, live = await liveRate(cur); if(st.cur!==cur || !sh.isConnected) return;
+        if(live){ st.rateInfo = live; $('#rate').value = live.rate.toFixed(4); $('#rate').title = 'European Central Bank rate, via frankfurter.app'; }
+        else { st.rateInfo = $('#rate').value ? null : {none:true}; if(!$('#rate').value) $('#rate').focus(); }
+        check(); } };
     if(tripCur) $('#cur').onchange();   // fetch today's rate for the trip's currency
-    $('#rate').oninput = check;
+    $('#rate').oninput = () => { if(st.rateInfo && !st.rateInfo.none) st.rateInfo = null; check(); }; $('#fee').oninput = check;
     const chg = $('#chg'); if(chg) chg.onclick = () => pickContext(c => openExpense({...opts, ctx:c, copyOf:null, prefill:{...(pre||{}), title:$('#ttl').value, amount:foreignAmt(), cur:st.cur, cat:st.cat, date:$('#dt').value, note:$('#nt')?.value||'', ai:false, items:null}}), 'Move it to…');
     if($('#rep')) $('#rep').onchange = () => { st.repeat = $('#rep').checked; if(!st.repeat) st.variable=false; syncRepeat(); };
     if($('#var')) $('#var').onchange = () => { st.variable = $('#var').checked; syncRepeat(); };
@@ -2660,7 +2729,7 @@ function openExpense(opts={}){
           $('#sn').className='note bad'; $('#sn').scrollIntoView({block:'center'}); return; }
       }
       $('#save').disabled = true;
-      if(st.cur!=='CAD') rememberRate(st.cur, rate());
+      if(st.cur!==HOME) rememberRate(st.cur, rate());
       let done, msg;
       if(st.repeat){
         const data = { groupId:ctx.id, title, amount:st.variable?0:a, variable:st.variable, paidBy:st.paidBy, category:st.cat, splitMode:st.mode, splitInput:inp, day:Number(date.slice(8,10)), every:st.every, month:Number(date.slice(5,7)) };
@@ -2674,20 +2743,20 @@ function openExpense(opts={}){
       } else {
         const id = ex ? ex._id : newId('e');
         const fsplit = computeSplit(a, st.mode, inp, id);
-        const split0 = st.cur==='CAD' ? fsplit : splitShares(cad, fsplit, id);
+        const split0 = st.cur===HOME ? fsplit : splitShares(cad, fsplit, id);
         // money in is stored as a negative expense: the same maths, so it comes off everyone's share
         const sign = st.refund ? -1 : 1, split = sign > 0 ? split0 : Object.fromEntries(Object.entries(split0).map(([k,v])=>[k,-v]));
         const body = { title, amount:sign*cad, paidBy:st.paidBy, split, splitMode:st.mode, splitInput:inp, category:st.cat, date, note,
-          orig: st.cur==='CAD' ? null : {cur:st.cur, amount:a, rate:rate()}, photo: st.photo || null, people:[...new Set([st.paidBy, ...Object.keys(split)])] };
+          orig: origOf(a), photo: st.photo || null, people:[...new Set([st.paidBy, ...Object.keys(split)])] };
         const priv = ex ? !!ex._priv : ctxIsPrivate(ctx);
         const ref = priv ? privDoc().collection('entries').doc(id) : db.doc('expenses/'+id);
         if(!ex && st.two && !st.refund){
           // Two people paid: one entry for each of them. Everyone's share is divided between the two in proportion
           // to what each paid, so the balances come out exactly as if it were one bill with two payers.
-          const f2 = toCents(st.paid2), b = st.cur==='CAD' ? f2 : Math.min(cad-1, Math.max(1, Math.round(f2*rate()))), id2 = newId('e');
+          const f2 = toCents(st.paid2), b = st.cur===HOME ? f2 : Math.min(cad-1, Math.max(1, Math.round(f2*(rate()*(1+fee()/100))))), id2 = newId('e');
           const s1 = splitShares(cad-b, split, id), s2 = {}; for(const [k,v] of Object.entries(split)) if(v-(s1[k]||0) > 0) s2[k] = v-(s1[k]||0);
           const ref2 = priv ? privDoc().collection('entries').doc(id2) : db.doc('expenses/'+id2);
-          const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact:sp}, orig: st.cur==='CAD' ? null : {cur:st.cur, amount:oa, rate:rate()},
+          const part = (n, by, amt, sp, oa) => ({kind:'expense', ...body, amount:amt, paidBy:by, split:sp, splitMode:'exact', splitInput:{exact:sp}, orig: origOf(oa),
             photo: n===1 ? body.photo : null, people:[...new Set([by, ...Object.keys(sp)])], pair:{id, n, total:cad, other: n===1 ? id2 : id},
             ...(priv?{friendId:ctxIds(ctx)[0]}:{groupId:isGroup?ctx.id:null}), createdAt:Date.now()+n-1, addedBy:myUid});
           done = await write(async () => { await ref.set(part(1, st.paidBy, cad-b, s1, a-f2)); await ref2.set(part(2, st.paidBy2, b, s2, f2)); });
@@ -2722,7 +2791,7 @@ function openDetail(id, priv){
   } else {
     const [,,lab] = catOf(e.category), needs = e.status==='needs_amount';
     const rule = ({shares:'by shares', exact:'by exact amounts', pct:'by percentage', items:'by items'})[e.splitMode] || 'equally';
-    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} CAD`:'', e.pair?`Part ${e.pair.n} of a ${money(e.pair.total)} bill two people paid`:'', `${lab}, ${dayLabel(e.date)}`, e.amount<0 ? `Money in. ${youOr(e.paidBy)} got it, shared ${rule}` : `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
+    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} ${HOME}${e.orig.fee?`, includes ${e.orig.fee}% card fee`:''}${e.orig.rateDate?` (rate from ${e.orig.rateDate})`:''}`:'', e.pair?`Part ${e.pair.n} of a ${money(e.pair.total)} bill two people paid`:'', `${lab}, ${dayLabel(e.date)}`, e.amount<0 ? `Money in. ${youOr(e.paidBy)} got it, shared ${rule}` : `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
     body = `<p class="detail-amt">${needs?'Needs amount':e.amount<0?'+'+money(-e.amount):money(e.amount)}</p><p class="note" style="margin:6px 0 0">${esc(meta)}.</p>
       ${e.note?`<p class="banner" style="margin:12px 0 0">${esc(e.note)}</p>`:''}${delNote}
       ${e.photo&&LAPTOP?`<a class="rphoto" href="/api/photo/${esc(e.photo)}" target="_blank" rel="noopener"><img src="/api/photo/${esc(e.photo)}" alt="Receipt photo" loading="lazy"><span>Receipt photo · tap to open</span></a>`:''}
@@ -2786,7 +2855,7 @@ function confirmPay(p, ctx){
   const mine = p.from===myUid || p.to===myUid, other = p.from===myUid ? p.to : p.from;
   openSheet(head(p.from===myUid?'I paid this':p.to===myUid?'I got paid':'Record a payment') + `<div class="pair">${av(p.from,'lg')}<span class="mut">→</span>${av(p.to,'lg')}</div>
     <p class="note" style="font-size:.95rem;margin:0">${esc(youOr(p.from))} paid ${esc(youOrLower(p.to))}, ${esc(ctxTitle(ctx))}</p>
-    <label class="f" for="pa">Amount</label><div class="amount-wrap"><span>$</span><input id="pa" inputmode="decimal" value="${(p.amount/100).toFixed(2)}"></div>
+    <label class="f" for="pa">Amount</label><div class="amount-wrap"><span>${CUR_SIGN}</span><input id="pa" inputmode="decimal" value="${(p.amount/100).toFixed(2)}"></div>
     <p class="note" id="pn">${p.to===myUid||(mine&&isGuest(other))||isGuest(p.to)?'Recorded straight away.':`${esc(firstName(p.to))} gets a quick “did you get it?” to confirm.`} Change the amount if only part was paid.</p>
     ${p.from===myUid?etBox(p.to):''}
     <div class="payrow"><div><label class="f" for="pd">When</label><input class="in" id="pd" type="date" value="${today()}" max="${today()}"></div>
@@ -2795,7 +2864,7 @@ function confirmPay(p, ctx){
     const pa = sh.querySelector('#pa'), ok = sh.querySelector('#ok'), pn = sh.querySelector('#pn'), base = pn.textContent;
     bindCopy(sh, () => toCents(pa.value));
     pa.oninput = () => { const a = toCents(pa.value); ok.disabled = !a || a > p.amount*2;
-      pn.textContent = a > p.amount ? `That’s ${money(a-p.amount)} more than owed, so ${youOrLower(p.to)} would then owe it back.` : base; };
+      pn.textContent = amtBad(pa.value) ? amtMsg(pa.value) : a > p.amount ? `That’s ${money(a-p.amount)} more than owed, so ${youOrLower(p.to)} would then owe it back.` : base; };
     ok.onclick = async () => { const a = toCents(pa.value); if(!a) return; ok.disabled = true;
       const before = myTotals().net;
       if(await recordPayment(ctx, p.from, p.to, a, {date:sh.querySelector('#pd').value, note:sh.querySelector('#pnote').value})){ closeSheet();
@@ -2810,7 +2879,7 @@ function openFriendSettle(fid){
     <p class="detail-amt" id="tot">${money(Math.abs(total))}</p><p class="note" style="font-size:.95rem;margin:4px 0 0">${total>0?esc(firstName(fid))+' pays you':'You pay '+esc(firstName(fid))}</p>
     ${parts.length>1?`<label class="f">What it covers</label><div class="split">${parts.map((p,i)=>`<label class="srow"><span class="nm">${esc(p.label)}</span><span class="share ${amtClass(p.amount)}">${signed(p.amount)}</span><input type="checkbox" data-part="${i}" checked></label>`).join('')}</div>
       <p class="note">Each one is recorded in its own group, so every group’s balance is right.</p>`:''}
-    <label class="f" for="pa">Amount paid</label><div class="amount-wrap"><span>$</span><input id="pa" inputmode="decimal" value="${(Math.abs(total)/100).toFixed(2)}"></div>
+    <label class="f" for="pa">Amount paid</label><div class="amount-wrap"><span>${CUR_SIGN}</span><input id="pa" inputmode="decimal" value="${(Math.abs(total)/100).toFixed(2)}"></div>
     <p class="note" id="pn">Change the amount if only part was paid.</p>
     ${total<0?etBox(fid):''}
     <div class="foot"><button class="btn" data-close>Not yet</button><button class="btn primary" id="ok">Record payment</button></div>`, sh => {
@@ -2818,7 +2887,7 @@ function openFriendSettle(fid){
     const selTotal = () => parts.filter((p,i)=>sel.has(i)).reduce((s,p)=>s+p.amount,0);
     const valid = () => { const a = toCents(pa.value), t = Math.abs(selTotal()); return sel.size && t && a > 0 && a <= t; };
     const upd = () => { const t = selTotal(); sh.querySelector('#tot').textContent = money(Math.abs(t)); ok.disabled = !valid();
-      const a = toCents(pa.value); pn.textContent = a > Math.abs(t) ? `That’s more than the ${money(Math.abs(t))} owed.` : a && a < Math.abs(t) ? `Part payment. ${money(Math.abs(t)-a)} will still be owed.` : 'Change the amount if only part was paid.'; };
+      const a = toCents(pa.value); pn.textContent = amtBad(pa.value) ? amtMsg(pa.value) : a > Math.abs(t) ? `That’s more than the ${money(Math.abs(t))} owed.` : a && a < Math.abs(t) ? `Part payment. ${money(Math.abs(t)-a)} will still be owed.` : 'Change the amount if only part was paid.'; };
     bindCopy(sh, () => toCents(pa.value));
     sh.querySelectorAll('[data-part]').forEach(c => c.onchange = () => { c.checked ? sel.add(Number(c.dataset.part)) : sel.delete(Number(c.dataset.part));
       pa.value = (Math.abs(selTotal())/100).toFixed(2); upd(); });
@@ -2858,6 +2927,7 @@ function openBill(id){
     <div class="foot"><button class="btn" id="pz">${r.paused?'Resume':'Pause'}</button><button class="btn" id="ed">Edit</button><button class="btn danger" id="dl">Delete</button></div>`:''}`, sh => {
     if(!canWrite) return;
     sh.querySelector('#pz').onclick = async () => {
+      if(r.takeover){ closeSheet(); toast(`${firstName(r.takeover.who)} left. Pick who takes over on the group page first`); return; }
       const upd = r.paused ? { paused:false, lastPosted: [r.lastPosted||'', lastDueKey(r)||''].sort().pop() || null } : { paused:true };
       if(await write(()=>db.doc('recurring/'+id).update(upd))){ closeSheet(); toast(r.paused?'Resumed. Paused months aren’t charged':'Paused'); } };
     sh.querySelector('#ed').onclick = () => openExpense({bill:r});
@@ -2873,12 +2943,13 @@ function fillAmount(id){
   const mode = e.splitMode || r?.splitMode, input = e.splitInput || r?.splitInput;   // the split it was posted with
   openSheet(head(`${catIcon(e.category)} ${esc(e.title)}`) + `
     <p class="note" style="margin:0">The ${r?.every==='week'?'bill for '+dayLabel(e.date):r?.every==='year'?e.date.slice(0,4)+' bill':monthName(e.date.slice(0,7))+' bill'}, ${esc(ctxLabel(e))}. ${esc(youOr(e.paidBy))} ${verb(e.paidBy,'pay')} it.</p>
-    <label class="f" for="fa">Amount on the bill</label><div class="amount-wrap"><span>$</span><input id="fa" inputmode="decimal" placeholder="0.00" autocomplete="off"></div>
-    <div class="split" id="fs"></div>
+    <label class="f" for="fa">Amount on the bill</label><div class="amount-wrap"><span>${CUR_SIGN}</span><input id="fa" inputmode="decimal" placeholder="0.00" autocomplete="off"></div>
+    <p class="note bad" id="fn" hidden></p><div class="split" id="fs"></div>
     <div class="foot"><button class="btn" data-close>Later</button><button class="btn primary" id="ok" disabled>Save</button></div>`, sh => {
     const inp = sh.querySelector('#fa'), ok = sh.querySelector('#ok');
     const draw = () => { const a = toCents(inp.value), sp = computeSplit(a, mode, input, e._id);
       sh.querySelector('#fs').innerHTML = Object.keys(computeSplit(100000, mode, input, e._id)).map(mid=>`<div class="srow">${av(mid,'sm')}<span class="nm">${esc(youOr(mid))}</span><span class="share">${a?money(sp[mid]||0):'—'}</span></div>`).join('');
+      const fn = sh.querySelector('#fn'); fn.hidden = !amtBad(inp.value); fn.textContent = fn.hidden ? '' : amtMsg(inp.value);
       ok.disabled = !a; return {a, sp}; };
     inp.oninput = draw; draw(); setTimeout(()=>inp.focus(),80);
     ok.onclick = async () => { const {a, sp} = draw(); if(!a) return; ok.disabled = true;
@@ -2891,7 +2962,7 @@ function fillAmount(id){
 // Each category keeps the same colour everywhere. Categories without a colour fold into grey "Other".
 const CAT_SLOT = {groceries:1, food:2, household:3, utilities:4, transport:5, rent:6, internet:7, drinks:8};
 const catColor = c => CAT_SLOT[c] ? `var(--s${CAT_SLOT[c]})` : 'var(--s0)';
-const kfmt = v => v>=100000 ? '$'+(v/100000).toFixed(v>=1000000?0:1)+'k' : '$'+Math.round(v/100);
+const kfmt = v => v>=100000 ? CUR_SIGN+(v/100000).toFixed(v>=1000000?0:1)+'k' : CUR_SIGN+Math.round(v/100);
 const lastMonths = n => { const out = []; let m = ymOf(new Date()); for(let i=0;i<n;i++){ out.unshift(m); m = prevYm(m); } return out; };
 const roundTop = (x, y, w, h, r) => { r = Math.min(r, h, w/2); return `M${x} ${y+h}V${y+r}Q${x} ${y} ${x+r} ${y}H${x+w-r}Q${x+w} ${y} ${x+w} ${y+r}V${y+h}Z`; };
 const range = () => { try{ return +localStorage.getItem('hs-range') || 6; }catch(e){ return 6; } };
@@ -3250,8 +3321,15 @@ function reviewMany(ctx, parsed){
     };
   });
 }
+// One CSV cell. Text that starts with = + - @ (or a tab or return) gets a ' in front, so a spreadsheet shows it
+// instead of running it as a formula. Plain numbers, like -12.50 for money in, stay numbers.
+function csvCell(v){
+  let t = String(v ?? '');
+  if(/^[=+\-@\t\r]/.test(t) && !/^-?\d+(\.\d+)?$/.test(t)) t = "'" + t;
+  return '"' + t.replace(/"/g,'""') + '"';
+}
 async function exportCsv(gid){
-  const q = v => '"'+String(v??'').replace(/"/g,'""')+'"', ms = groupMembers(gid).map(m=>m.id);
+  const q = csvCell, ms = groupMembers(gid).map(m=>m.id);
   const rows = [['Date','Type','Description','Category','Amount','Paid by', ...ms.map(id=>nameOf(id)+' share'),'Note','Status'].map(q).join(',')];
   groupEntries(gid).slice().sort((a,b)=>byDate(b,a)).forEach(e => {
     const status = e.deletedAt?'Deleted':e.status==='needs_amount'?'Needs amount':e.confirmed===false?'Not confirmed':'';
@@ -3282,7 +3360,7 @@ Category ids: ${CATS.map(c=>c[0]).join(', ')}.
 Pick the best "where". If one friend is named and no group fits, use that friend. If the place is a group (house, trip name) or several group members are named, use the group.
 Inside it: named people share it; "everyone"/"all"/nothing said means all members. "except X" leaves X out. "X owes me N" means I paid and only X shares it. Per-person amounts mean exact.
 Reply with only one JSON object:
-{"currency": "CAD unless another currency is clear (USD, EUR, GBP, INR, MXN, AUD)", "items": null or [{"name": "item", "price": dollars}] (only for receipts), "tax": dollars or 0, "tip": dollars or 0, "where": "g:<id>" or "f:<id>" or "", "title": "short title, 2 to 5 words, capitalised", "amount": total in dollars (0 if unknown), "paidBy": "member id", "category": "one category id", "date": "YYYY-MM-DD", "participants": ["member ids"], "exact": null or {"member id": dollars}, "repeatMonthly": true only if it says monthly}`;
+{"currency": "${HOME} unless another currency is clear (${CURRENCIES.filter(c=>c!==HOME).join(', ')})", "items": null or [{"name": "item", "price": dollars}] (only for receipts), "tax": dollars or 0, "tip": dollars or 0, "where": "g:<id>" or "f:<id>" or "", "title": "short title, 2 to 5 words, capitalised", "amount": total in dollars (0 if unknown), "paidBy": "member id", "category": "one category id", "date": "YYYY-MM-DD", "participants": ["member ids"], "exact": null or {"member id": dollars}, "repeatMonthly": true only if it says monthly}`;
 }
 function cleanAi(d){
   let ctx = null;
@@ -3300,7 +3378,7 @@ function cleanAi(d){
   return { ctx, prefill:{ title: typeof d?.title==='string' ? d.title.slice(0,60) : '', amount, paidBy: okId(d?.paidBy) ? d.paidBy : myUid,
     cat: CATS.some(c=>c[0]===d?.category) ? d.category : 'other', date: /^\d{4}-\d{2}-\d{2}$/.test(d?.date||'') ? d.date : today(),
     ids: p.length ? p : null, exact, repeat: !!d?.repeatMonthly, ai:true,
-    cur: CURRENCIES.includes(d?.currency) ? d.currency : 'CAD',
+    cur: CURRENCIES.includes(d?.currency) ? d.currency : HOME,
     items: Array.isArray(d?.items) ? d.items.filter(it=>it && Number(it.price)>0).slice(0,40).map(it=>({n:String(it.name||'Item').slice(0,40), p:Math.round(Number(it.price)*100)})) : null,
     tax: Math.max(0, Math.round((Number(d?.tax)||0)*100)), tip: Math.max(0, Math.round((Number(d?.tip)||0)*100)) } };
 }
@@ -3320,7 +3398,7 @@ function localParse(raw){
   let t = ' ' + String(raw||'').replace(/\s+/g,' ').trim() + ' ';
   const low = () => t.toLowerCase();
   const cut = re => { const m = t.match(re); if(m) t = t.replace(re, ' '); return m; };
-  const out = { currency:'CAD', items:null, tax:0, tip:0, where:'', title:'', amount:0, paidBy:myUid, category:null, date:today(), participants:[], exact:null, repeatMonthly:false };
+  const out = { currency:HOME, items:null, tax:0, tip:0, where:'', title:'', amount:0, paidBy:myUid, category:null, date:today(), participants:[], exact:null, repeatMonthly:false };
   // currency
   const CUR_WORDS = [['USD',/\b(usd|us\$|us dollars?)\b/i],['EUR',/€|\b(eur|euros?)\b/i],['GBP',/£|\b(gbp|pounds?)\b/i],['INR',/₹|\b(inr|rupees?|rs\.?)\b/i],['MXN',/\b(mxn|pesos?)\b/i],['AUD',/\b(aud|aussie dollars?)\b/i]];
   for(const [c,re] of CUR_WORDS) if(re.test(t)){ out.currency = c; t = t.replace(re,' '); break; }
@@ -3371,6 +3449,9 @@ function localParse(raw){
   if((m = cut(/\b(?:\+|plus )?tax\s*\$?(\d+(?:[.,]\d{1,2})?)\b/i))) out.tax = +m[1].replace(',','.');
   // "2 x 15" means 30
   if((m = cut(/\b(\d{1,2})\s*[x×*]\s*\$?(\d+(?:[.,]\d{1,2})?)\b/i))) out.amount = Math.round(+m[1] * +m[2].replace(',','.') * 100) / 100;
+  // an amount that isn't plain ("1.234,56", "10-15", "12.345") is left for the person to type, never guessed
+  if(!out.amount){ const bad = [...t.matchAll(/(?:^|\s)[$€£₹]?(\d[\d.,\-]*\d)(?=[.,!?]?(?:\s|$))/g)].find(x => /-/.test(x[1]) || amtBad(x[1]));
+    if(bad){ out.unclear = bad[1]; t = t.slice(0, bad.index) + ' ' + t.slice(bad.index + bad[0].length); } }
   // amount: the last money-looking number
   const nums = [...t.matchAll(/(?:[$€£₹]\s?)?(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?:\s?[$€£₹])?(?![\d:])/g)].filter(x => !/\d+(st|nd|rd|th)/i.test(t.slice(x.index, x.index+x[0].length+2)));
   // numbers that are times or head counts, not money: "7pm", "7:30", "split 3 ways", "for 4", "3 people", "4 of us"
@@ -3380,7 +3461,7 @@ function localParse(raw){
   const inSkip = x => { const a = x.index + x[0].search(/\d/); return skip.some(([s,e]) => a >= s && a < e); };
   const money = nums.filter(x => !inSkip(x));
   if(money.length) nums.splice(0, nums.length, ...money);
-  if(nums.length && !out.amount){ const pick = nums.find(x => /[$€£₹]/.test(x[0])) || nums.find(x => /[.,]\d{1,2}$/.test(x[1]) && !/,\d{3}$/.test(x[1])) || nums[nums.length-1];
+  if(nums.length && !out.amount && !out.unclear){ const pick = nums.find(x => /[$€£₹]/.test(x[0])) || nums.find(x => /[.,]\d{1,2}$/.test(x[1]) && !/,\d{3}$/.test(x[1])) || nums[nums.length-1];
     out.amount = +pick[1].replace(/,(?=\d{3})/g,'').replace(',','.'); t = t.slice(0,pick.index) + ' ' + t.slice(pick.index+pick[0].length); }
   for(const re of notMoney) t = t.replace(re, ' ');
   if(out.amount && (out.tax || out.tip) && !/total/i.test(raw)) out.amount = Math.round((out.amount + out.tax + out.tip)*100)/100;
@@ -3424,6 +3505,7 @@ async function quickAdd(text){
     if(ctx) openExpense({ctx, prefill, refund}); else pickContext(c => openExpense({ctx:c, prefill, refund}), 'Who’s it with?'); };
   // Read it on the device first. Only ask the AI (if it's set up) when that can't find an amount.
   let local = null; try{ local = localParse(text); }catch(e){ console.error(e); }
+  if(local?.unclear){ toast(amtMsg(local.unclear)); return go(local); }   // open it with the amount empty, and say why
   if(local && (local.amount || !sample)) return go(local);
   if(!sample) return go(local || {title:text});
   btn.disabled = true; btn.innerHTML = '<span class="thinking"><i></i><i></i><i></i></span>'; app.querySelector('#qhintT').textContent = 'Reading that…';
@@ -3532,7 +3614,7 @@ async function openAdmin(){
     <div id="admUpdate"></div>
     ${warn.length?`<div class="banner">${warn.map(esc).join('<br>')}</div>`:''}
     <label class="f">Health</label><div class="health">${stat('v'+esc(hh.version), 'Split it on Node '+esc(hh.node))}${stat(ago(Date.now()-hh.uptime).replace(' ago','').replace('just now','a moment'), 'running for')}${stat(fmtBytes(hh.dbBytes), hh.docs+' records')}${stat(hh.photos, 'receipt photos, '+fmtBytes(hh.photoBytes))}${hh.disk?stat(fmtBytes(hh.disk.free), 'free on disk'):''}${stat(ago(hh.lastBackupAt), 'last backup')}${hh.copyDir?stat(hh.copyAt?ago(hh.copyAt):'not yet', 'copy off the laptop'):''}${stat(ago(hh.lastBillRun), 'bills checked')}${stat(hh.listeners, 'phones open now')}</div>
-    <p class="note">${hh.email?'Email is on.':'Email is off.'} ${hh.google?'Google sign-in is on.':'Google sign-in is off.'} Reminders go out after ${hh.remindHour}:00. Data lives in <span style="word-break:break-all">${esc(hh.dataDir)}</span>.</p>
+    <p class="note">${hh.email?'Email is on.':'Email is off.'} ${hh.google?'Google sign-in is on.':'Google sign-in is off.'} Reminders go out after ${hh.remindHour}:00. Money is kept in ${esc(hh.homeCurrency||HOME)} (HOME_CURRENCY in split-it.env). ${hh.ratesDate?`Trip exchange rates are from ${esc(hh.ratesDate)}${hh.ratesError?`; the rate service isn’t answering (${esc(hh.ratesError)})`:''}.`:''} Data lives in <span style="word-break:break-all">${esc(hh.dataDir)}</span>.</p>
     <label class="f">People (${o.people.length})${o.invites?` · ${o.invites} open invite${o.invites===1?'':'s'}`:''}</label>
     <div class="card">${o.people.map(p => `<button class="row" data-adm="${esc(p.id)}">${av(p.id)}<div class="body"><div class="t ell">${esc(p.nickname||p.name)}${p.owner?' <small class="mut">owner</small>':''}</div><div class="m">${p.lastSeen?'Seen '+ago(p.lastSeen):'Never opened it'}${p.push?' · phone alerts on':''}${p.mcp?' · '+p.mcp+' assistant'+(p.mcp===1?'':'s'):''}${p.code?' · sign-in code on':''}${!p.hasPassword&&!p.google&&!p.email?' · no way to sign in yet':''}</div></div><span class="chev">›</span></button>`).join('')}</div>
     <label class="f">Backups</label>
