@@ -1,5 +1,10 @@
 # docker compose up -d
 # Then: docker compose exec split-it node server.js add-user YOURNAME
+# Restore a backup (works while it runs; the file must be inside the container, e.g. in /backup-copy):
+#   docker compose exec split-it node server.js restore /backup-copy/split-it-backup-2026-11-11.locked
+#
+# Coming from v2.1? The app no longer runs as root inside the container, so hand the data over once:
+#   docker compose run --rm --user root split-it chown -R node:node /data
 services:
   split-it:
     build: .
@@ -9,6 +14,11 @@ services:
       - "8080:8080"
     volumes:
       - split-it-data:/data
+      # A second place for backups (a USB drive or a synced folder on the host). Uncomment both lines marked "copy".
+      # - /path/on/this/computer:/backup-copy          # copy
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
     environment:
       # Fill these in, or mount a split-it.env file at /app/split-it.env
       - PUBLIC_URL=
@@ -16,6 +26,11 @@ services:
       - MAIL_FROM=
       - GOOGLE_CLIENT_ID=
       - GOOGLE_CLIENT_SECRET=
+      # Your time zone, so reminders, bill dates and "today" follow the house's clock and not UTC.
+      - TZ=${TZ:-America/Toronto}
       - REMIND_HOUR=9
+      # - BACKUP_COPY_DIR=/backup-copy                 # copy
+      # Locks the copies off the laptop. Keep it somewhere that isn't the laptop: without it nobody can open them, you included.
+      # - BACKUP_PASSPHRASE=a long phrase only you know
 volumes:
   split-it-data:

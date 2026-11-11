@@ -3,4 +3,7 @@ node_modules
 *.tar.gz
 docs
 scripts
+test
+.git
 .github
+split-it.env

@@ -1,10 +1,17 @@
 // Split it service worker: lets phones install the app, keeps a copy of the app and the
 // latest data so it opens away from wifi, and shows notifications.
-const SHELL = 'split-it-shell-v3', DATA = 'split-it-data-v3';
+// The data copy belongs to one person: it lives in a cache named after them, and a different person
+// signing in on the same phone (or anyone signing out) clears it, so nobody sees someone else's numbers offline.
+const SHELL = 'split-it-shell-v4', DATA_PREFIX = 'split-it-data-v4-', WHO_KEY = '/__split-it-who';
 const PRECACHE = ['/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/shim.js'];
-self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(c => c.addAll(PRECACHE).catch(() => {}))); self.skipWaiting(); });
+// The page itself too: a worker that takes over an open page (right after an update) never sees it load,
+// and without it the app wouldn't open away from wifi until the next visit. Signed out, '/' is a redirect and isn't kept.
+self.addEventListener('install', e => { e.waitUntil(caches.open(SHELL).then(async c => {
+  await c.addAll(PRECACHE).catch(() => {});
+  try { const r = await fetch('/', { credentials: 'same-origin' }); if (cacheable(r)) await c.put('/', r); } catch {}
+})); self.skipWaiting(); });
 self.addEventListener('activate', e => e.waitUntil((async () => {
-  for (const k of await caches.keys()) if (k !== SHELL && k !== DATA) await caches.delete(k);
+  for (const k of await caches.keys()) if (k !== SHELL && !k.startsWith(DATA_PREFIX)) await caches.delete(k);
   await self.clients.claim();
 })()));
 
@@ -29,10 +36,48 @@ async function staleWhileRevalidate(req, cacheName) {
   const net = fetch(req).then(r => { if (cacheable(r)) c.put(req, r.clone()); return r; }).catch(() => null);
   return hit || (await net) || Response.error();
 }
+// Whose data the cache holds: remembered in the app cache, since the worker itself can be stopped any time.
+let who;
+async function getWho() {
+  if (who !== undefined) return who;
+  const hit = await (await caches.open(SHELL)).match(WHO_KEY);
+  return (who = hit ? await hit.text() : '');
+}
+async function clearData() {
+  for (const k of await caches.keys()) if (k.startsWith(DATA_PREFIX) || k === 'split-it-data-v3') await caches.delete(k);
+}
+async function setWho(uid) {
+  uid = uid || '';
+  if (uid === await getWho()) return;
+  await clearData();   // someone else now: the last person's copy goes
+  who = uid;
+  await (await caches.open(SHELL)).put(WHO_KEY, new Response(uid));
+}
+// Reads are kept per person. /api/me says who is signed in; other reads carry the page's X-Hs-User
+// and are only saved, or served offline, when that matches.
+async function dataRead(req, url) {
+  const isMe = url.pathname === '/api/me', isPhoto = url.pathname.startsWith('/api/photo/');
+  const tag = req.headers.get('X-Hs-User') || '';
+  try {
+    const r = await fetch(req);
+    if (isMe) {
+      if (r.ok) { const d = await r.clone().json().catch(() => null); if (d && d.uid) await setWho(d.uid); }
+      else if (r.status === 401) await setWho('');
+    }
+    const u = await getWho();
+    if (u && cacheable(r) && (isMe || isPhoto || tag === u)) await (await caches.open(DATA_PREFIX + u)).put(req, r.clone());
+    return r;
+  } catch (e) {
+    const u = await getWho();
+    if (u && (isMe || isPhoto || tag === u)) { const hit = await (await caches.open(DATA_PREFIX + u)).match(req); if (hit) return fromCache(hit); }
+    throw e;
+  }
+}
 const READ_API = /^\/api\/(col|doc|me|profiles|auth-options|push\/who|push\/key)(\?|$)/;
 self.addEventListener('fetch', e => {
   const req = e.request, url = new URL(req.url);
   if (url.origin !== self.location.origin || req.method !== 'GET') return;
+  if (url.pathname === '/api/logout') { e.respondWith(setWho('').then(() => fetch(req))); return; }
   if (req.mode === 'navigate') {
     e.respondWith((async () => {
       try { return await networkFirst(req, SHELL, url.pathname === '/' || url.pathname === '/index.html' ? '/' : undefined); }
@@ -41,12 +86,14 @@ self.addEventListener('fetch', e => {
     return;
   }
   if (url.pathname === '/shim.js') return e.respondWith(networkFirst(req, SHELL));
-  if (/^\/(art\/|icon|apple-touch-icon|manifest\.webmanifest|api\/photo\/)/.test(url.pathname)) return e.respondWith(staleWhileRevalidate(req, SHELL));
-  if (READ_API.test(url.pathname + url.search)) return e.respondWith(networkFirst(req, DATA));
+  if (url.pathname.startsWith('/api/photo/')) return e.respondWith(dataRead(req, url));   // receipts are personal: kept with the person's data
+  if (/^\/(art\/|vendor\/tesseract\/|icon|apple-touch-icon|manifest\.webmanifest)/.test(url.pathname)) return e.respondWith(staleWhileRevalidate(req, SHELL));
+  if (READ_API.test(url.pathname + url.search)) return e.respondWith(dataRead(req, url));
 });
 
+// Sent by the page on sign-out: forget the saved data and whose it was.
 self.addEventListener('message', e => {
-  if (e.data === 'clear-data') e.waitUntil(caches.delete(DATA));
+  if (e.data === 'clear-data') e.waitUntil(setWho('').then(clearData));
 });
 
 self.addEventListener('push', e => {

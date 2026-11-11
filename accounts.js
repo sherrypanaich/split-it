@@ -1,11 +1,24 @@
-// Accounts for Split it: invite links, email (through Resend), password reset,
-// email sign-in links, Sign in with Google, change password, sign out everywhere.
+// Accounts: invite links, email (through Resend), password reset, email sign-in links,
+// Sign in with Google, change password, a sign-in code from an authenticator app, sign out everywhere,
+// and finding people already on the app: a unique @tag each, friend requests, and a friend link (QR code).
+// Split it and Budget it share this file word for word (Budget it's tests check it), so a fix made
+// for one reaches the other. Anything that differs between them comes in through `h`.
+//
+// What it gives the app (module.exports):
+//   accounts(h) -> handle(req, res, url, uid): answers the routes below and returns true, or false when they aren't its.
+//     h: users() (the users.json object), saveUsers, docs() (the records), saveDb, broadcast, hashPw, findUser,
+//     setCookie, cookies, clientIp, misses, tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS, endSessions;
+//     optional: appName, envFile, cookieName, tagline, noteMiss, slowDown, notify, inviteInfo, onJoin, cancelClaim.
+//   handle also has: base(req) (the app's address), resetLink(req, uid), needsCode(uid), checkCode(uid, code),
+//     codeTicket(uid), codeOff(uid), totp(secret, step), startSession(req, res, uid), uniqueTag(name, but), ensureTags().
+//   Session helpers, also on module.exports: sessionKey(token) (the sha256 kept in users.json), sessionGet(store, token),
+//     sessionPut(store, token, rec), sessionDrop(store, token), migrateSessions(store), slideSession(rec, days, at).
 //
 // It stays private: nobody can sign up on their own. A new account needs an
 // invite link from someone already in. Google and email only sign in people
 // who already have an account (or who hold an invite).
 //
-// Settings (environment variables, or a split-it.env file next to server.js):
+// Settings (environment variables, or the app's .env file next to server.js):
 //   PUBLIC_URL            the address people use, e.g. https://laptop.tail1234.ts.net
 //   RESEND_API_KEY        from resend.com, turns on emails
 //   MAIL_FROM             e.g. "Split it <hello@yourdomain.com>" (a domain verified in Resend)
@@ -14,14 +27,34 @@
 'use strict';
 const crypto = require('crypto');
 
+// ---------- sessions (shared helpers; both apps' server.js use them too) ----------
+// A sign-in cookie holds a random token. users.json keeps only its sha256, so a copied backup can't sign anyone in.
+// Each record is { uid, exp, at (signed in), slid (last time exp was pushed on) }.
+const sessionKey = t => crypto.createHash('sha256').update(String(t)).digest('hex');
+const sessionGet = (store, t) => { const k = t && sessionKey(t); return k && store.sessions && Object.hasOwn(store.sessions, k) ? store.sessions[k] : null; };
+const sessionPut = (store, t, rec) => { store.sessions = store.sessions || {}; store.sessions[sessionKey(t)] = rec; return rec; };
+const sessionDrop = (store, t) => { const k = t && sessionKey(t); if (!k || !store.sessions || !Object.hasOwn(store.sessions, k)) return false; delete store.sessions[k]; return true; };
+// Files from before tokens were hashed: hash every key once, so nobody is signed out. Returns true when it changed something.
+const migrateSessions = store => {
+  if (store.sessionsHashed) return false;
+  const out = {}; for (const [t, s] of Object.entries(store.sessions || {})) out[sessionKey(t)] = s;
+  store.sessions = out; store.sessionsHashed = true; return true;
+};
+// A session in use keeps going: each day it's used, it runs `days` from then. True when it moved (save, and send the cookie again).
+const slideSession = (s, days, at = Date.now()) => {
+  if (!s || s.exp < at || at - (s.slid || s.at || 0) < 864e5) return false;
+  s.exp = at + days * 864e5; s.slid = at; return true;
+};
+
 module.exports = function accounts(h) {
   const { users, saveUsers, docs, saveDb, broadcast, hashPw, findUser, setCookie, cookies, clientIp, misses,
     tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS } = h;
+  const APP = h.appName || 'Split it', ENVFILE = h.envFile || 'split-it.env', COOKIE = h.cookieName || 'hs', TAG = h.tagline || '';
   const env = k => (process.env[k] || '').trim();
   // Emails carry sign-in links, so they only go out once PUBLIC_URL says where those links point.
   // Without it a link would be built from whatever address the request claimed to come to.
-  if (env('RESEND_API_KEY') && !env('PUBLIC_URL')) console.error('Emails are off: set PUBLIC_URL in split-it.env to turn them on.');
-  const RESEND = env('PUBLIC_URL') ? env('RESEND_API_KEY') : '', FROM = env('MAIL_FROM') || 'Split it <onboarding@resend.dev>';
+  if (env('RESEND_API_KEY') && !env('PUBLIC_URL')) console.error(`Emails are off: set PUBLIC_URL in ${ENVFILE} to turn them on.`);
+  const RESEND = env('PUBLIC_URL') ? env('RESEND_API_KEY') : '', FROM = env('MAIL_FROM') || `${APP} <onboarding@resend.dev>`;
   const G_ID = env('GOOGLE_CLIENT_ID'), G_SECRET = env('GOOGLE_CLIENT_SECRET');
   const G_AUTH = env('GOOGLE_AUTH_URL') || 'https://accounts.google.com/o/oauth2/v2/auth';
   const G_TOKEN = env('GOOGLE_TOKEN_URL') || 'https://oauth2.googleapis.com/token';
@@ -39,17 +72,25 @@ module.exports = function accounts(h) {
     if (set) return set;
     return (secure(req) ? 'https://' : 'http://') + String(req.headers.host || 'localhost');
   }
-  function miss(req) {
-    const ip = clientIp(req), m = misses.get(ip);
-    misses.set(ip, { n: (m && now() - m.at < 15 * 60e3 ? m.n : 0) + 1, at: now() });
-  }
+  // A wrong try counts against the address it came from and, when we know it, the account it was aimed at.
+  const miss = h.noteMiss || (req => { const ip = clientIp(req), m = misses.get(ip); misses.set(ip, { n: (m && now() - m.at < 15 * 60e3 ? m.n : 0) + 1, at: now() }); });
   function startSession(req, res, uid) {
     const t = crypto.randomBytes(32).toString('hex');
     for (const [k, s] of Object.entries(U().sessions)) if (s.exp < now()) delete U().sessions[k];
-    U().sessions[t] = { uid, exp: now() + SESSION_DAYS * 864e5 };
+    sessionPut(U(), t, { uid, exp: now() + SESSION_DAYS * 864e5, at: now() });
     saveUsers();
     setCookie(req, res, t, SESSION_DAYS * 86400);
   }
+  // Wrong tries aimed at one account slow that account's sign-in down; they never lock it (see slowDown in server.js).
+  const pause = uid => (h.slowDown ? h.slowDown(uid) : null);
+  // Add a cookie without dropping one this answer already sets (a refreshed sign-in, say).
+  const addCookie = (res, c) => { const prev = res.getHeader('Set-Cookie'), name = c.split('=')[0] + '=';
+    res.setHeader('Set-Cookie', [...[].concat(prev || []).filter(x => !String(x).startsWith(name)), c]); };
+  // Where to go after signing in: only a path on this site (the assistant connect page, say), never another site.
+  const okNext = n => typeof n === 'string' && /^\/(?![\/\\])[^\s]*$/.test(n) && n.length < 2000 ? n : '';
+  const pwOk = (pw, u) => { if (!u.hash || !u.salt) return false;
+    const h2 = Buffer.from(crypto.scryptSync(pw, u.salt, 64).toString('hex')), want = Buffer.from(u.hash);
+    return h2.length === want.length && crypto.timingSafeEqual(h2, want); };
   const userByEmail = e => Object.entries(U().users).find(([, u]) => u.emailVerified && u.email === cleanEmail(e));
   const userByGoogle = sub => Object.entries(U().users).find(([, u]) => u.google === sub);
 
@@ -69,11 +110,46 @@ module.exports = function accounts(h) {
     return c;
   }
 
+  // ---------- sign-in code: a second step from an authenticator app (TOTP, RFC 6238) ----------
+  // Optional, per person. Once it's on, a password or an emailed sign-in link is not enough by itself:
+  // the 6-digit code from the app, or one of eight one-time backup codes, is needed too.
+  // Google sign-in is left alone, because Google asks for its own second step.
+  const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  const toB32 = buf => { let bits = '', out = ''; for (const b of buf) bits += b.toString(2).padStart(8, '0');
+    for (let i = 0; i + 5 <= bits.length; i += 5) out += B32[parseInt(bits.slice(i, i + 5), 2)]; return out; };
+  const fromB32 = s => { let bits = ''; for (const c of String(s).toUpperCase().replace(/[^A-Z2-7]/g, '')) bits += B32.indexOf(c).toString(2).padStart(5, '0');
+    const out = []; for (let i = 0; i + 8 <= bits.length; i += 8) out.push(parseInt(bits.slice(i, i + 8), 2)); return Buffer.from(out); };
+  const totp = (secret, step) => { const c = Buffer.alloc(8); c.writeBigUInt64BE(BigInt(step));
+    const m = crypto.createHmac('sha1', fromB32(secret)).update(c).digest(), o = m[19] & 15;
+    return String((m.readUInt32BE(o) & 0x7fffffff) % 1e6).padStart(6, '0'); };
+  const same = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  // The 30-second step a code belongs to (this one, the one before or the one after), or 0 when it's wrong.
+  const stepFor = (secret, code) => { const t = Math.floor(now() / 30e3); for (const st of [t, t - 1, t + 1]) if (same(totp(secret, st), code)) return st; return 0; };
+  const cleanBackup = c => String(c || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const newBackupCodes = () => Array.from({ length: 8 }, () => { const c = toB32(crypto.randomBytes(5)).toLowerCase(); return c.slice(0, 4) + '-' + c.slice(4); });
+  const needsCode = uid => !!U().users[uid]?.totp?.on;
+  function checkCode(uid, input) {   // right code -> true, and that code can't be used again
+    const u = U().users[uid]; if (!u?.totp?.on) return true;
+    const digits = String(input || '').replace(/\s/g, '');
+    if (/^\d{6}$/.test(digits)) {
+      const st = stepFor(u.totp.secret, digits);
+      if (!st || st <= (u.totp.last || 0)) return false;
+      u.totp.last = st; saveUsers(); return true;
+    }
+    const i = (u.totp.backup || []).indexOf(sha(cleanBackup(input)));
+    if (i < 0 || !cleanBackup(input)) return false;
+    u.totp.backup.splice(i, 1); saveUsers(); return true;
+  }
+  // Turn it off for someone (they lost their phone): used by the owner's page and `node server.js code-off NAME`.
+  const codeOff = uid => { const u = U().users[uid]; if (!u) return false; const had = !!u.totp?.on; delete u.totp; delete u.totpPending; saveUsers(); return had; };
+  // The first step was right and a code is still needed: a ticket, good for 10 minutes, to finish signing in with.
+  const codeTicket = uid => makeCode('2fa', { uid }, 10);
+
   // ---------- email ----------
   async function mail(to, subject, lines, link, button) {
-    if (!RESEND) throw new Error('Email isn’t set up on this Split it yet.');
+    if (!RESEND) throw new Error(`Email isn’t set up on this ${APP} yet.`);
     const html = `<div style="font-family:system-ui,sans-serif;max-width:480px;margin:auto;padding:24px;color:#14112A">
-      <h2 style="margin:0 0 4px">Split it</h2><p style="margin:0 0 18px;color:#5D5870;font-size:13px">by Budget it</p>
+      <h2 style="margin:0 0 ${TAG ? 4 : 18}px">${esc(APP)}</h2>${TAG ? `<p style="margin:0 0 18px;color:#5D5870;font-size:13px">${esc(TAG)}</p>` : ''}
       ${lines.map(l => `<p>${esc(l)}</p>`).join('')}
       <p style="margin:24px 0"><a href="${esc(link)}" style="background:#FFD23F;color:#14112A;padding:12px 20px;border-radius:10px;border:2px solid #14112A;font-weight:700;text-decoration:none">${esc(button)}</a></p>
       <p style="color:#5D5870;font-size:13px">If the button doesn’t work, copy this link: ${esc(link)}</p>
@@ -99,24 +175,54 @@ module.exports = function accounts(h) {
   }
   function createFromInvite(inv, fields) {
     const id = 'u_' + crypto.randomBytes(11).toString('hex');
-    U().users[id] = { owner: false, invitedBy: inv.by, createdAt: now(), ...fields };
+    U().users[id] = { owner: false, invitedBy: inv.by, createdAt: now(), ...fields, tag: uniqueTag(fields.name) };
     inv.used = now(); inv.uid = id;
     saveUsers();
-    if (U().users[inv.by]) {   // friends with whoever sent the link, both ways
-      const a = `data/users/${inv.by}/root/friends/${id}`, b = `data/users/${id}/root/friends/${inv.by}`;
-      docs()[a] = { kind: 'account', addedAt: now() }; docs()[b] = { kind: 'account', addedAt: now() };
-      saveDb(); broadcast([a, b]);
-    }
+    if (U().users[inv.by]) makeFriends(inv.by, id);   // friends with whoever sent the link, both ways
+    if (h.onJoin) h.onJoin(inv, id);   // a personal invite: the history it carries waits for their yes
     return id;
   }
 
+  // ---------- finding people already on the app ----------
+  // Everyone has a unique @tag (letters, numbers and _), picked from their name and changeable later.
+  // You find someone by their exact tag or exact checked email, never by browsing, and adding them is a
+  // request they accept. A friend link (shown as a QR code) skips the request: sharing it is the yes.
+  const TAG_RE = /^[a-z0-9_]{3,20}$/;
+  const cleanTag = t => String(t || '').trim().toLowerCase().replace(/^@/, '');
+  const tagTaken = (t, but) => Object.entries(U().users).some(([id, u]) => id !== but && u.tag === t);
+  function uniqueTag(name, but) {
+    let b = String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '').slice(0, 16);
+    if (b.length < 3) b = (b + 'friend').slice(0, 6);
+    if (!tagTaken(b, but)) return b;
+    for (let i = 2; i < 1000; i++) if (!tagTaken(b + i, but)) return b + i;
+    return b + rand(3).toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+  function ensureTags() { let n = 0; for (const [id, u] of Object.entries(U().users)) if (!u.tag) { u.tag = uniqueTag(u.name, id); n++; } if (n) saveUsers(); }
+  const friendPath = (a, b) => `data/users/${a}/root/friends/${b}`;
+  const areFriends = (a, b) => docs()[friendPath(a, b)]?.kind === 'account' && docs()[friendPath(b, a)]?.kind === 'account';
+  function makeFriends(a, b) {
+    const ps = [friendPath(a, b), friendPath(b, a)].filter(p => docs()[p]?.kind !== 'account');
+    for (const p of ps) docs()[p] = { ...(docs()[p] || {}), kind: 'account', addedAt: now() };
+    if (ps.length) { saveDb(); broadcast(ps); }
+  }
+  const lookups = new Map();   // uid -> recent lookups, so nobody can walk through every tag
+  const tooManyLookups = uid => { const l = (lookups.get(uid) || []).filter(t => now() - t < 10 * 60e3); const over = l.length >= 30; if (!over) l.push(now()); lookups.set(uid, l); return over; };   // only tries under the limit count, so the list can't grow
+  const card = id => ({ uid: id, name: nameFor(id), tag: U().users[id]?.tag || null });
+  const tell = (uids, msg) => { if (h.notify) Promise.resolve(h.notify(uids, msg)).catch(() => {}); };
+  // One friend notification per pair an hour: asking, taking it back and asking again doesn't buzz their phone each time.
+  const told = new Map();   // "from>to" -> when they were last told
+  const tellOnce = (from, to, msg) => { const k = from + '>' + to, t = told.get(k);
+    if (t && now() - t < 3600e3) return;
+    told.set(k, now()); if (told.size > 5000) for (const [x, at] of told) if (now() - at >= 3600e3) told.delete(x);
+    tell([to], msg); };
+
   // ---------- Google ----------
   const gStates = new Map();   // state -> { mode, uid, invite, exp }
-  function googleStart(req, res, mode, uid, invite) {
+  function googleStart(req, res, mode, uid, invite, next) {
     for (const [k, v] of gStates) if (v.exp < now()) gStates.delete(k);
     const state = rand(24);
-    gStates.set(state, { mode, uid, invite, exp: now() + 10 * 60e3 });
-    res.setHeader('Set-Cookie', `gst=${state}; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=600${secure(req) ? '; Secure' : ''}`);
+    gStates.set(state, { mode, uid, invite, next: okNext(next), exp: now() + 10 * 60e3 });
+    addCookie(res, `gst=${state}; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=600${secure(req) ? '; Secure' : ''}`);
     const q = new URLSearchParams({ client_id: G_ID, redirect_uri: base(req) + '/auth/google/callback', response_type: 'code',
       scope: 'openid email profile', state, prompt: 'select_account' });
     res.writeHead(302, { Location: `${G_AUTH}?${q}` }); res.end();
@@ -125,7 +231,7 @@ module.exports = function accounts(h) {
   async function googleCallback(req, res, url) {
     const state = url.searchParams.get('state') || '', code = url.searchParams.get('code') || '';
     const st = gStates.get(state); gStates.delete(state);
-    res.setHeader('Set-Cookie', `gst=; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=0`);
+    addCookie(res, `gst=; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=0`);
     if (!st || st.exp < now() || cookies(req).gst !== state) return back(res, '/login', 'That Google sign-in timed out. Try again.');
     if (!code) return back(res, st.mode === 'link' ? '/' : '/login', 'Google sign-in was cancelled.');
     let p;
@@ -143,7 +249,7 @@ module.exports = function accounts(h) {
     if (st.mode === 'link') {
       const me = U().users[st.uid];
       if (!me) return back(res, '/login');
-      if (taken && taken[0] !== st.uid) return back(res, '/', 'That Google account is already used by someone else on Split it.');
+      if (taken && taken[0] !== st.uid) return back(res, '/', `That Google account is already used by someone else on ${APP}.`);
       me.google = p.sub; me.googleEmail = email || undefined;
       if (email && !me.emailVerified && !userByEmail(email)) { me.email = email; me.emailVerified = true; delete me.pendingEmail; }
       saveUsers();
@@ -161,9 +267,9 @@ module.exports = function accounts(h) {
     // sign in: Google account already connected, or its email matches a checked email on an account
     let found = taken;
     if (!found && email) { found = userByEmail(email); if (found) { found[1].google = p.sub; found[1].googleEmail = email; saveUsers(); } }
-    if (!found) return back(res, '/login', 'That Google account isn’t on Split it. Ask a friend for an invite link, or sign in another way.');
+    if (!found) return back(res, '/login', `That Google account isn’t on ${APP}. Ask a friend for an invite link, or sign in another way.`);
     startSession(req, res, found[0]);
-    return back(res, '/');
+    return back(res, st.next || '/');
   }
 
   // ---------- requests ----------
@@ -180,7 +286,7 @@ module.exports = function accounts(h) {
       const { token, name, password } = await readBody(req);
       const inv = liveInvite(token);
       if (!inv) { miss(req); return send(res, 410, { error: 'This invite link has expired or was already used. Ask your friend for a new one.' }), true; }
-      if (name === undefined) return send(res, 200, { ok: true, from: nameFor(inv.by), google: !!(G_ID && G_SECRET) }), true;
+      if (name === undefined) return send(res, 200, { ok: true, from: nameFor(inv.by), google: !!(G_ID && G_SECRET), waiting: h.inviteInfo ? h.inviteInfo(inv) : null }), true;
       const n = String(name || '').trim().replace(/\s+/g, ' ');
       if (n.length < 2 || n.length > 30) return send(res, 400, { error: 'Pick a name between 2 and 30 characters.' }), true;
       if (n.includes('@')) return send(res, 400, { error: 'Use a name, not an email. You can add your email after.' }), true;
@@ -192,18 +298,18 @@ module.exports = function accounts(h) {
 
     // Google
     if (p === '/auth/google' && m === 'GET') {
-      if (!G_ID || !G_SECRET) return back(res, '/login', 'Google sign-in isn’t set up on this Split it yet.'), true;
+      if (!G_ID || !G_SECRET) return back(res, '/login', `Google sign-in isn’t set up on this ${APP} yet.`), true;
       const mode = url.searchParams.get('mode');
       if (mode === 'link') { if (!me) return back(res, '/login'), true; googleStart(req, res, 'link', uid); return true; }
       if (mode === 'join') { googleStart(req, res, 'join', null, url.searchParams.get('invite') || ''); return true; }
-      googleStart(req, res, 'login'); return true;
+      googleStart(req, res, 'login', null, null, url.searchParams.get('next')); return true;
     }
     if (p === '/auth/google/callback' && m === 'GET') { await googleCallback(req, res, url); return true; }
 
     // forgot password and email sign-in links (always the same answer, so nobody can probe who has an account)
     if ((p === '/api/forgot' || p === '/api/email-link') && m === 'POST') {
       const wait = tooManyTries(req); if (wait) return send(res, 429, { error: wait }), true;
-      if (!RESEND) return send(res, 400, { error: 'Email isn’t set up on this Split it yet. Ask whoever runs it to reset your password.' }), true;
+      if (!RESEND) return send(res, 400, { error: `Email isn’t set up on this ${APP} yet. Ask whoever runs it to reset your password.` }), true;
       const { who } = await readBody(req);
       miss(req);   // counts toward the 5-per-15-minutes limit either way
       const found = findUser(String(who || ''));
@@ -212,9 +318,9 @@ module.exports = function accounts(h) {
         const reset = p === '/api/forgot';
         const t = makeCode(reset ? 'reset' : 'signin', { uid: found[0] }, reset ? 60 : 15);
         try {
-          await mail(u.email, reset ? 'Reset your Split it password' : 'Your Split it sign-in link',
-            reset ? [`Hi ${u.name}, someone asked to reset your Split it password.`, 'The link works once, for the next hour.']
-                  : [`Hi ${u.name}, here’s your link to sign in to Split it.`, 'The link works once, for the next 15 minutes.'],
+          await mail(u.email, reset ? `Reset your ${APP} password` : `Your ${APP} sign-in link`,
+            reset ? [`Hi ${u.name}, someone asked to reset your ${APP} password.`, 'The link works once, for the next hour.']
+                  : [`Hi ${u.name}, here’s your link to sign in to ${APP}.`, 'The link works once, for the next 15 minutes.'],
             `${base(req)}/login#${reset ? 'reset' : 'signin'}=${t}`, reset ? 'Pick a new password' : 'Sign in');
         } catch (e) { console.error(e.message); }
       }
@@ -225,6 +331,19 @@ module.exports = function accounts(h) {
       const { token } = await readBody(req);
       const c = takeCode('signin', String(token || ''));
       if (!c || !U().users[c.uid]) { miss(req); return send(res, 410, { error: 'This sign-in link has expired or was already used. Ask for a new one.' }), true; }
+      if (needsCode(c.uid)) return send(res, 200, { need: 'code', ticket: codeTicket(c.uid) }), true;
+      startSession(req, res, c.uid);
+      return send(res, 200, { ok: true }), true;
+    }
+    // second step of signing in: the code from the authenticator app, or a backup code
+    if (p === '/api/login/code' && m === 'POST') {
+      const { ticket, code } = await readBody(req);
+      const c = takeCode('2fa', String(ticket || ''), true);
+      if (!c || !U().users[c.uid]) return send(res, 410, { error: 'That took too long. Sign in again.' }), true;
+      const wait = tooManyTries(req, c.uid); if (wait) return send(res, 429, { error: wait }), true;
+      await pause(c.uid);
+      if (!checkCode(c.uid, code)) { miss(req, c.uid); return send(res, 401, { error: 'That code isn’t right. Check your authenticator app, or use a backup code.' }), true; }
+      takeCode('2fa', String(ticket));
       startSession(req, res, c.uid);
       return send(res, 200, { ok: true }), true;
     }
@@ -236,7 +355,9 @@ module.exports = function accounts(h) {
       if (String(password || '').length < 8) return send(res, 400, { error: 'Use at least 8 characters.' }), true;
       takeCode('reset', String(token));
       Object.assign(U().users[c.uid], hashPw(String(password)));
-      for (const [k, s] of Object.entries(U().sessions)) if (s.uid === c.uid) delete U().sessions[k];   // sign out everywhere else
+      h.endSessions(c.uid, { assistants: true });   // sign out everywhere else, assistants too
+      // With a sign-in code on, a reset link alone doesn't sign you in: you sign in with the new password and the code.
+      if (needsCode(c.uid)) return send(res, 200, { ok: true, signin: true }), true;
       startSession(req, res, c.uid);
       return send(res, 200, { ok: true }), true;
     }
@@ -250,6 +371,7 @@ module.exports = function accounts(h) {
     }
 
     if (!me) return false;   // everything below needs a signed-in person
+    if (!me.tag) ensureTags();
 
     if (p === '/api/invite' && m === 'POST') {
       U().invites = U().invites || {};
@@ -261,23 +383,115 @@ module.exports = function accounts(h) {
       saveUsers();
       return send(res, 200, { token, exp: U().invites[token].exp }), true;
     }
+    // your open invite links, so you can see who hasn't joined yet and cancel a link
+    if (p === '/api/invites' && m === 'GET') {
+      const list = Object.entries(U().invites || {}).filter(([, v]) => v.by === uid && !v.used && v.exp > now())
+        .map(([t, v]) => ({ id: sha(t).slice(0, 16), at: v.at, exp: v.exp, name: v.name || null, claim: v.claim || null })).sort((a, b) => b.at - a.at);
+      return send(res, 200, { list }), true;
+    }
+    if (p === '/api/invites/cancel' && m === 'POST') {
+      const { id } = await readBody(req);
+      const hit = Object.entries(U().invites || {}).find(([t, v]) => v.by === uid && !v.used && sha(t).slice(0, 16) === id);
+      if (!hit) return send(res, 404, { error: 'That link is already gone.' }), true;
+      delete U().invites[hit[0]]; saveUsers();
+      if (hit[1].claim && h.cancelClaim) h.cancelClaim(hit[1].claim);
+      return send(res, 200, { ok: true }), true;
+    }
+
+    // ---------- @tags, friend requests, friend links ----------
+    if (p === '/api/account/tag' && m === 'POST') {
+      const t = cleanTag((await readBody(req)).tag);
+      if (!TAG_RE.test(t)) return send(res, 400, { error: 'Use 3 to 20 letters, numbers or _.' }), true;
+      if (tagTaken(t, uid)) return send(res, 409, { error: `@${t} is taken. Try another.` }), true;
+      me.tag = t; saveUsers();
+      return send(res, 200, { ok: true, tag: t }), true;
+    }
+    if (p === '/api/people/find' && m === 'POST') {
+      if (tooManyLookups(uid)) return send(res, 429, { error: 'That’s a lot of searching. Wait a few minutes.' }), true;
+      const q = String((await readBody(req)).q || '').trim().toLowerCase();
+      let hit = null;
+      if (q.includes('@') && q.includes('.') && !q.startsWith('@')) hit = userByEmail(q);
+      else { const t = cleanTag(q); hit = Object.entries(U().users).find(([, u]) => u.tag === t); }
+      if (!hit) return send(res, 404, { error: q.includes('.') ? 'Nobody here has that email checked on their account.' : 'Nobody here has that tag.' }), true;
+      if (hit[0] === uid) return send(res, 400, { error: 'That’s you.' }), true;
+      return send(res, 200, { ...card(hit[0]), friend: areFriends(uid, hit[0]),
+        asked: Object.values(U().friendReqs || {}).some(r => r.from === uid && r.to === hit[0]) }), true;
+    }
+    if (p === '/api/friends/requests' && m === 'GET') {
+      const all = Object.entries(U().friendReqs || {});
+      return send(res, 200, { incoming: all.filter(([, r]) => r.to === uid && U().users[r.from]).map(([id, r]) => ({ id, at: r.at, ...card(r.from) })),
+        outgoing: all.filter(([, r]) => r.from === uid && U().users[r.to]).map(([id, r]) => ({ id, at: r.at, ...card(r.to) })) }), true;
+    }
+    if (p === '/api/friends/request' && m === 'POST') {
+      const to = String((await readBody(req)).to || '');
+      if (!Object.hasOwn(U().users, to) || to === uid) return send(res, 400, { error: 'Pick someone else.' }), true;
+      if (areFriends(uid, to)) return send(res, 200, { ok: true, friends: true }), true;
+      U().friendReqs = U().friendReqs || {};
+      const back = Object.entries(U().friendReqs).find(([, r]) => r.from === to && r.to === uid);
+      if (back) { delete U().friendReqs[back[0]]; saveUsers(); makeFriends(uid, to); return send(res, 200, { ok: true, friends: true }), true; }   // they asked you already
+      if (Object.values(U().friendReqs).some(r => r.from === uid && r.to === to)) return send(res, 200, { ok: true, asked: true }), true;
+      if (Object.values(U().friendReqs).filter(r => r.from === uid).length >= 30) return send(res, 429, { error: 'You have 30 requests waiting. Wait for some answers first.' }), true;
+      U().friendReqs[rand(9)] = { from: uid, to, at: now() }; saveUsers();
+      tellOnce(uid, to, { title: `${nameFor(uid)} wants to be friends`, body: `@${me.tag} on ${APP}. Open it to accept.`, tag: 'friend-' + uid });
+      return send(res, 200, { ok: true, asked: true }), true;
+    }
+    if (p === '/api/friends/answer' && m === 'POST') {
+      const { id, yes } = await readBody(req);
+      const r = typeof id === 'string' && Object.hasOwn(U().friendReqs || {}, id) ? U().friendReqs[id] : null;
+      if (!r || (r.to !== uid && r.from !== uid)) return send(res, 404, { error: 'That request is gone.' }), true;
+      delete U().friendReqs[id]; saveUsers();   // the sender taking it back, or the other person answering
+      if (yes && r.to === uid && U().users[r.from]) { makeFriends(uid, r.from); tell([r.from], { title: `${nameFor(uid)} accepted`, body: `You’re friends on ${APP} now.`, tag: 'friend-' + uid }); }
+      return send(res, 200, { ok: true }), true;
+    }
+    if (p === '/api/friends/link' && m === 'POST') {
+      if (!me.friendToken || (await readBody(req)).fresh) { me.friendToken = rand(15); saveUsers(); }
+      return send(res, 200, { url: `${base(req)}/#add=${me.friendToken}`, tag: me.tag }), true;
+    }
+    if (p === '/api/friends/link/use' && m === 'POST') {
+      const wait = tooManyTries(req); if (wait) return send(res, 429, { error: wait }), true;
+      const t = String((await readBody(req)).token || '');
+      const hit = t && Object.entries(U().users).find(([, u]) => u.friendToken && u.friendToken.length === t.length && same(u.friendToken, t));
+      if (!hit) { miss(req); return send(res, 404, { error: 'That friend link was changed or doesn’t exist.' }), true; }
+      if (hit[0] === uid) return send(res, 400, { error: 'That’s your own friend link.' }), true;
+      const already = areFriends(uid, hit[0]);
+      makeFriends(uid, hit[0]);
+      if (!already) tellOnce(uid, hit[0], { title: `${nameFor(uid)} added you`, body: `They used your friend link. You’re friends on ${APP} now.`, tag: 'friend-' + uid });
+      return send(res, 200, { ok: true, ...card(hit[0]) }), true;
+    }
     if (p === '/api/account' && m === 'GET') {
-      return send(res, 200, { name: me.name, email: me.emailVerified ? me.email : null, pendingEmail: me.pendingEmail || null,
+      return send(res, 200, { name: me.name, tag: me.tag || null, email: me.emailVerified ? me.email : null, pendingEmail: me.pendingEmail || null,
         google: !!me.google, googleEmail: me.googleEmail || null, hasPassword: !!me.hash,
+        code: needsCode(uid), backupCodes: me.totp?.on ? (me.totp.backup || []).length : 0,
         options: { google: !!(G_ID && G_SECRET), email: !!RESEND } }), true;
     }
     if (p === '/api/account/email' && m === 'POST') {
-      const { email } = await readBody(req);
+      const { email, current, code } = await readBody(req);
       const e = cleanEmail(email);
+      // An email can reset the password, so changing it needs proof it's really you, not just an unlocked phone:
+      // the current password, or a sign-in code, or (signs in with Google or email only) a sign-in in the last 10 minutes.
+      if (!(me.emailVerified && me.email === e && !me.pendingEmail)) {
+        const wait = tooManyTries(req, uid); if (wait) return send(res, 429, { error: wait }), true;
+        const sess = sessionGet(U(), cookies(req)[COOKIE]);
+        const fresh = sess && sess.uid === uid && now() - (sess.at || 0) < 10 * 60e3;
+        let ok = false;
+        if (current && me.hash) ok = pwOk(String(current), me);
+        if (!ok && code && needsCode(uid)) { await pause(uid); ok = checkCode(uid, code); }
+        if (!ok && !me.hash && !needsCode(uid)) ok = fresh;
+        if (!ok) {
+          if (current || code) { miss(req, uid); return send(res, 401, { error: me.hash ? 'Your current password isn’t right.' : 'That code isn’t right.' }), true; }
+          return send(res, 403, { error: me.hash ? 'Type your current password to change your email.' : needsCode(uid) ? 'Type a code from your authenticator app to change your email.' : 'For your safety, sign out and sign in again, then change your email within 10 minutes.',
+            need: me.hash ? 'password' : needsCode(uid) ? 'code' : 'fresh' }), true;
+        }
+      }
       if (!e) { delete me.pendingEmail; if (me.google || me.hash) { delete me.email; delete me.emailVerified; } saveUsers(); return send(res, 200, { ok: true }), true; }
       if (!okEmail(e)) return send(res, 400, { error: 'That doesn’t look like an email address.' }), true;
       const other = userByEmail(e); if (other && other[0] !== uid) return send(res, 409, { error: 'That email is already on another account.' }), true;
       if (me.emailVerified && me.email === e) return send(res, 200, { ok: true }), true;
-      if (!RESEND) return send(res, 400, { error: 'Email isn’t set up on this Split it yet.' }), true;
+      if (!RESEND) return send(res, 400, { error: `Email isn’t set up on this ${APP} yet.` }), true;
       if (tooSoon(uid, 'verify')) return send(res, 429, { error: 'Wait a minute before asking for another email.' }), true;
       me.pendingEmail = e; saveUsers();
       const t = makeCode('verify', { uid, email: e }, 24 * 60);
-      try { await mail(e, 'Check your email for Split it', [`Hi ${me.name}, tap below to add this email to your Split it account.`, 'Then you can sign in with it and reset your password if you forget it.'], `${base(req)}/auth/verify?t=${t}`, 'Yes, this is my email'); }
+      try { await mail(e, `Check your email for ${APP}`, [`Hi ${me.name}, tap below to add this email to your ${APP} account.`, 'Then you can sign in with it and reset your password if you forget it.'], `${base(req)}/auth/verify?t=${t}`, 'Yes, this is my email'); }
       catch (err) { return send(res, 502, { error: err.message }), true; }
       return send(res, 200, { ok: true, pending: e }), true;
     }
@@ -290,9 +504,8 @@ module.exports = function accounts(h) {
       }
       if (String(next || '').length < 8) return send(res, 400, { error: 'Use at least 8 characters for the new password.' }), true;
       Object.assign(me, hashPw(String(next)));
-      const mine = cookies(req).hs;
-      for (const [k, s] of Object.entries(U().sessions)) if (s.uid === uid && k !== mine) delete U().sessions[k];
-      saveUsers();
+      const mine = cookies(req)[COOKIE];
+      h.endSessions(uid, { keep: mine ? sessionKey(mine) : null });
       return send(res, 200, { ok: true }), true;
     }
     if (p === '/api/account/google' && m === 'DELETE') {
@@ -300,9 +513,37 @@ module.exports = function accounts(h) {
       delete me.google; delete me.googleEmail; saveUsers();
       return send(res, 200, { ok: true }), true;
     }
+    // sign-in code: start (get a key for the app), confirm (prove the app works), off, new backup codes
+    if (p === '/api/account/code/start' && m === 'POST') {
+      if (needsCode(uid)) return send(res, 400, { error: 'A sign-in code is already on.' }), true;
+      if (!me.hash && !(me.emailVerified && RESEND)) return send(res, 400, { error: 'A sign-in code goes with a password or an email sign-in link. Set a password first.' }), true;
+      const secret = toB32(crypto.randomBytes(20));
+      me.totpPending = { secret, at: now() }; saveUsers();
+      return send(res, 200, { secret, uri: `otpauth://totp/${encodeURIComponent(APP + ':' + me.name)}?secret=${secret}&issuer=${encodeURIComponent(APP)}&digits=6&period=30` }), true;
+    }
+    if (p === '/api/account/code/confirm' && m === 'POST') {
+      const { code } = await readBody(req), pend = me.totpPending;
+      if (needsCode(uid)) return send(res, 400, { error: 'A sign-in code is already on.' }), true;
+      if (!pend || now() - pend.at > 30 * 60e3) return send(res, 410, { error: 'That took too long. Start again.' }), true;
+      const st = stepFor(pend.secret, String(code || '').replace(/\s/g, '').padEnd(6, 'x').slice(0, 6));
+      if (!st) return send(res, 401, { error: 'That code isn’t right. Check the key in your app and try the newest code.' }), true;
+      const backup = newBackupCodes();
+      me.totp = { on: true, secret: pend.secret, at: now(), last: st, backup: backup.map(c => sha(cleanBackup(c))) };
+      delete me.totpPending; saveUsers();
+      return send(res, 200, { ok: true, backup }), true;
+    }
+    if ((p === '/api/account/code/off' || p === '/api/account/code/backup') && m === 'POST') {
+      if (!needsCode(uid)) return send(res, 400, { error: 'A sign-in code isn’t on.' }), true;
+      const wait = tooManyTries(req, uid); if (wait) return send(res, 429, { error: wait }), true;
+      const { code } = await readBody(req);
+      await pause(uid);
+      if (!checkCode(uid, code)) { miss(req, uid); return send(res, 401, { error: 'That code isn’t right.' }), true; }
+      if (p.endsWith('/off')) { codeOff(uid); return send(res, 200, { ok: true }), true; }
+      const backup = newBackupCodes(); me.totp.backup = backup.map(c => sha(cleanBackup(c))); saveUsers();
+      return send(res, 200, { ok: true, backup }), true;
+    }
     if (p === '/api/account/signout-all' && m === 'POST') {
-      for (const [k, s] of Object.entries(U().sessions)) if (s.uid === uid) delete U().sessions[k];
-      saveUsers(); setCookie(req, res, '', 0);
+      h.endSessions(uid, { assistants: true }); setCookie(req, res, '', 0);
       return send(res, 200, { ok: true }), true;
     }
     return false;
@@ -310,5 +551,8 @@ module.exports = function accounts(h) {
   handle.base = base;
   // A one-time reset link the owner can hand to someone who is locked out (works for a day).
   handle.resetLink = (req, uid) => `${base(req)}/login#reset=${makeCode('reset', { uid }, 60 * 24)}`;
+  Object.assign(handle, { needsCode, checkCode, codeTicket, codeOff, totp, startSession, uniqueTag, ensureTags });
+  ensureTags();
   return handle;
 };
+Object.assign(module.exports, { sessionKey, sessionGet, sessionPut, sessionDrop, migrateSessions, slideSession });
