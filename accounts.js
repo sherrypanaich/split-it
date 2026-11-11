@@ -16,6 +16,25 @@
 'use strict';
 const crypto = require('crypto');
 
+// ---------- sessions (shared helpers; both apps' server.js use them too) ----------
+// A sign-in cookie holds a random token. users.json keeps only its sha256, so a copied backup can't sign anyone in.
+// Each record is { uid, exp, at (signed in), slid (last time exp was pushed on) }.
+const sessionKey = t => crypto.createHash('sha256').update(String(t)).digest('hex');
+const sessionGet = (store, t) => { const k = t && sessionKey(t); return k && store.sessions && Object.hasOwn(store.sessions, k) ? store.sessions[k] : null; };
+const sessionPut = (store, t, rec) => { store.sessions = store.sessions || {}; store.sessions[sessionKey(t)] = rec; return rec; };
+const sessionDrop = (store, t) => { const k = t && sessionKey(t); if (!k || !store.sessions || !Object.hasOwn(store.sessions, k)) return false; delete store.sessions[k]; return true; };
+// Files from before tokens were hashed: hash every key once, so nobody is signed out. Returns true when it changed something.
+const migrateSessions = store => {
+  if (store.sessionsHashed) return false;
+  const out = {}; for (const [t, s] of Object.entries(store.sessions || {})) out[sessionKey(t)] = s;
+  store.sessions = out; store.sessionsHashed = true; return true;
+};
+// A session in use keeps going: each day it's used, it runs `days` from then. True when it moved (save, and send the cookie again).
+const slideSession = (s, days, at = Date.now()) => {
+  if (!s || s.exp < at || at - (s.slid || s.at || 0) < 864e5) return false;
+  s.exp = at + days * 864e5; s.slid = at; return true;
+};
+
 module.exports = function accounts(h) {
   const { users, saveUsers, docs, saveDb, broadcast, hashPw, findUser, setCookie, cookies, clientIp, misses,
     tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS } = h;
@@ -47,10 +66,20 @@ module.exports = function accounts(h) {
   function startSession(req, res, uid) {
     const t = crypto.randomBytes(32).toString('hex');
     for (const [k, s] of Object.entries(U().sessions)) if (s.exp < now()) delete U().sessions[k];
-    U().sessions[t] = { uid, exp: now() + SESSION_DAYS * 864e5 };
+    sessionPut(U(), t, { uid, exp: now() + SESSION_DAYS * 864e5, at: now() });
     saveUsers();
     setCookie(req, res, t, SESSION_DAYS * 86400);
   }
+  // Wrong tries aimed at one account slow that account's sign-in down; they never lock it (see slowDown in server.js).
+  const pause = uid => (h.slowDown ? h.slowDown(uid) : null);
+  // Add a cookie without dropping one this answer already sets (a refreshed sign-in, say).
+  const addCookie = (res, c) => { const prev = res.getHeader('Set-Cookie'), name = c.split('=')[0] + '=';
+    res.setHeader('Set-Cookie', [...[].concat(prev || []).filter(x => !String(x).startsWith(name)), c]); };
+  // Where to go after signing in: only a path on this site (the assistant connect page, say), never another site.
+  const okNext = n => typeof n === 'string' && /^\/(?![\/\\])[^\s]*$/.test(n) && n.length < 2000 ? n : '';
+  const pwOk = (pw, u) => { if (!u.hash || !u.salt) return false;
+    const h2 = Buffer.from(crypto.scryptSync(pw, u.salt, 64).toString('hex')), want = Buffer.from(u.hash);
+    return h2.length === want.length && crypto.timingSafeEqual(h2, want); };
   const userByEmail = e => Object.entries(U().users).find(([, u]) => u.emailVerified && u.email === cleanEmail(e));
   const userByGoogle = sub => Object.entries(U().users).find(([, u]) => u.google === sub);
 
@@ -148,11 +177,11 @@ module.exports = function accounts(h) {
 
   // ---------- Google ----------
   const gStates = new Map();   // state -> { mode, uid, invite, exp }
-  function googleStart(req, res, mode, uid, invite) {
+  function googleStart(req, res, mode, uid, invite, next) {
     for (const [k, v] of gStates) if (v.exp < now()) gStates.delete(k);
     const state = rand(24);
-    gStates.set(state, { mode, uid, invite, exp: now() + 10 * 60e3 });
-    res.setHeader('Set-Cookie', `gst=${state}; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=600${secure(req) ? '; Secure' : ''}`);
+    gStates.set(state, { mode, uid, invite, next: okNext(next), exp: now() + 10 * 60e3 });
+    addCookie(res, `gst=${state}; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=600${secure(req) ? '; Secure' : ''}`);
     const q = new URLSearchParams({ client_id: G_ID, redirect_uri: base(req) + '/auth/google/callback', response_type: 'code',
       scope: 'openid email profile', state, prompt: 'select_account' });
     res.writeHead(302, { Location: `${G_AUTH}?${q}` }); res.end();
@@ -161,7 +190,7 @@ module.exports = function accounts(h) {
   async function googleCallback(req, res, url) {
     const state = url.searchParams.get('state') || '', code = url.searchParams.get('code') || '';
     const st = gStates.get(state); gStates.delete(state);
-    res.setHeader('Set-Cookie', `gst=; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=0`);
+    addCookie(res, `gst=; Path=/auth/google; HttpOnly; SameSite=Lax; Max-Age=0`);
     if (!st || st.exp < now() || cookies(req).gst !== state) return back(res, '/login', 'That Google sign-in timed out. Try again.');
     if (!code) return back(res, st.mode === 'link' ? '/' : '/login', 'Google sign-in was cancelled.');
     let p;
@@ -199,7 +228,7 @@ module.exports = function accounts(h) {
     if (!found && email) { found = userByEmail(email); if (found) { found[1].google = p.sub; found[1].googleEmail = email; saveUsers(); } }
     if (!found) return back(res, '/login', `That Google account isn’t on ${APP}. Ask a friend for an invite link, or sign in another way.`);
     startSession(req, res, found[0]);
-    return back(res, '/');
+    return back(res, st.next || '/');
   }
 
   // ---------- requests ----------
@@ -232,7 +261,7 @@ module.exports = function accounts(h) {
       const mode = url.searchParams.get('mode');
       if (mode === 'link') { if (!me) return back(res, '/login'), true; googleStart(req, res, 'link', uid); return true; }
       if (mode === 'join') { googleStart(req, res, 'join', null, url.searchParams.get('invite') || ''); return true; }
-      googleStart(req, res, 'login'); return true;
+      googleStart(req, res, 'login', null, null, url.searchParams.get('next')); return true;
     }
     if (p === '/auth/google/callback' && m === 'GET') { await googleCallback(req, res, url); return true; }
 
@@ -271,6 +300,7 @@ module.exports = function accounts(h) {
       const c = takeCode('2fa', String(ticket || ''), true);
       if (!c || !U().users[c.uid]) return send(res, 410, { error: 'That took too long. Sign in again.' }), true;
       const wait = tooManyTries(req, c.uid); if (wait) return send(res, 429, { error: wait }), true;
+      await pause(c.uid);
       if (!checkCode(c.uid, code)) { miss(req, c.uid); return send(res, 401, { error: 'That code isn’t right. Check your authenticator app, or use a backup code.' }), true; }
       takeCode('2fa', String(ticket));
       startSession(req, res, c.uid);
@@ -318,8 +348,24 @@ module.exports = function accounts(h) {
         options: { google: !!(G_ID && G_SECRET), email: !!RESEND } }), true;
     }
     if (p === '/api/account/email' && m === 'POST') {
-      const { email } = await readBody(req);
+      const { email, current, code } = await readBody(req);
       const e = cleanEmail(email);
+      // An email can reset the password, so changing it needs proof it's really you, not just an unlocked phone:
+      // the current password, or a sign-in code, or (signs in with Google or email only) a sign-in in the last 10 minutes.
+      if (!(me.emailVerified && me.email === e && !me.pendingEmail)) {
+        const wait = tooManyTries(req, uid); if (wait) return send(res, 429, { error: wait }), true;
+        const sess = sessionGet(U(), cookies(req)[COOKIE]);
+        const fresh = sess && sess.uid === uid && now() - (sess.at || 0) < 10 * 60e3;
+        let ok = false;
+        if (current && me.hash) ok = pwOk(String(current), me);
+        if (!ok && code && needsCode(uid)) { await pause(uid); ok = checkCode(uid, code); }
+        if (!ok && !me.hash && !needsCode(uid)) ok = fresh;
+        if (!ok) {
+          if (current || code) { miss(req, uid); return send(res, 401, { error: me.hash ? 'Your current password isn’t right.' : 'That code isn’t right.' }), true; }
+          return send(res, 403, { error: me.hash ? 'Type your current password to change your email.' : needsCode(uid) ? 'Type a code from your authenticator app to change your email.' : 'For your safety, sign out and sign in again, then change your email within 10 minutes.',
+            need: me.hash ? 'password' : needsCode(uid) ? 'code' : 'fresh' }), true;
+        }
+      }
       if (!e) { delete me.pendingEmail; if (me.google || me.hash) { delete me.email; delete me.emailVerified; } saveUsers(); return send(res, 200, { ok: true }), true; }
       if (!okEmail(e)) return send(res, 400, { error: 'That doesn’t look like an email address.' }), true;
       const other = userByEmail(e); if (other && other[0] !== uid) return send(res, 409, { error: 'That email is already on another account.' }), true;
@@ -342,7 +388,7 @@ module.exports = function accounts(h) {
       if (String(next || '').length < 8) return send(res, 400, { error: 'Use at least 8 characters for the new password.' }), true;
       Object.assign(me, hashPw(String(next)));
       const mine = cookies(req)[COOKIE];
-      h.endSessions(uid, { keep: mine });
+      h.endSessions(uid, { keep: mine ? sessionKey(mine) : null });
       return send(res, 200, { ok: true }), true;
     }
     if (p === '/api/account/google' && m === 'DELETE') {
@@ -373,6 +419,7 @@ module.exports = function accounts(h) {
       if (!needsCode(uid)) return send(res, 400, { error: 'A sign-in code isn’t on.' }), true;
       const wait = tooManyTries(req, uid); if (wait) return send(res, 429, { error: wait }), true;
       const { code } = await readBody(req);
+      await pause(uid);
       if (!checkCode(uid, code)) { miss(req, uid); return send(res, 401, { error: 'That code isn’t right.' }), true; }
       if (p.endsWith('/off')) { codeOff(uid); return send(res, 200, { ok: true }), true; }
       const backup = newBackupCodes(); me.totp.backup = backup.map(c => sha(cleanBackup(c))); saveUsers();
@@ -387,6 +434,7 @@ module.exports = function accounts(h) {
   handle.base = base;
   // A one-time reset link the owner can hand to someone who is locked out (works for a day).
   handle.resetLink = (req, uid) => `${base(req)}/login#reset=${makeCode('reset', { uid }, 60 * 24)}`;
-  Object.assign(handle, { needsCode, checkCode, codeTicket, codeOff, totp });
+  Object.assign(handle, { needsCode, checkCode, codeTicket, codeOff, totp, startSession });
   return handle;
 };
+Object.assign(module.exports, { sessionKey, sessionGet, sessionPut, sessionDrop, migrateSessions, slideSession });

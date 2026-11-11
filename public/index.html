@@ -1484,9 +1484,13 @@ async function drawAccount(box){
       try{ await go(); }catch(x){ err.textContent = x.message; b.disabled = false; } };
     const c = form.querySelector('[data-cancel]'); if(c) c.onclick = () => { form.innerHTML = ''; }; };
   const ee = box.querySelector('#acEmailEdit');
+  // An email can reset the password, so changing it asks for the password (or a sign-in code) first.
   if(ee) ee.onclick = () => ask(`<label class="f" for="acE" style="margin-top:0">Your email</label><input class="in" id="acE" type="email" autocomplete="email" inputmode="email" value="${esc(a.pendingEmail||a.email||'')}">
+      ${a.hasPassword?`<label class="f" for="acEP">Current password</label><input class="in" id="acEP" type="password" autocomplete="current-password">`
+        :a.code?`<label class="f" for="acEC">Code from your authenticator app</label><input class="in" id="acEC" inputmode="numeric" autocomplete="one-time-code">`
+        :`<p class="note">For your safety this works within 10 minutes of signing in. If it says so, sign out, sign in again and come back.</p>`}
       <div class="foot" style="position:static;padding:10px 0 0"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-go>Send link</button></div>`,
-    async () => { const r = await api('/api/account/email', { email: form.querySelector('#acE').value }); toast(r.pending ? 'Check your inbox for the link' : 'Saved'); drawAccount(box); });
+    async () => { const r = await api('/api/account/email', { email: form.querySelector('#acE').value, current: form.querySelector('#acEP')?.value || '', code: form.querySelector('#acEC')?.value || '' }); toast(r.pending ? 'Check your inbox for the link' : 'Saved'); drawAccount(box); });
   const go = box.querySelector('#acGoogleOff');
   if(go) go.onclick = async () => { try{ await api('/api/account/google', null, 'DELETE'); toast('Google disconnected'); drawAccount(box); }catch(e){ toast(e.message); } };
   box.querySelector('#acPw').onclick = () => ask(`${a.hasPassword?`<label class="f" for="acC" style="margin-top:0">Current password</label><input class="in" id="acC" type="password" autocomplete="current-password">`:''}

@@ -115,11 +115,13 @@ test('five wrong passwords from one address lock that address out, even with the
   assert.strictEqual((await browser('10.77.0.2').signIn('Cat', 'cat-password')).status, 200, 'someone else is not locked out by it');
 });
 
-test('ten wrong passwords for one person lock that account, whatever address they come from', async () => {
+test('ten wrong passwords for one person slow that account down, but never lock its owner out', async () => {
   assert.match(cli(['add-user', 'Target'], 'target-password\n'), /Added/);
   for (let i = 0; i < 10; i++) assert.strictEqual((await browser(`10.78.0.${i + 1}`).signIn('Target', 'wrong-guess-' + i)).status, 401);
-  assert.strictEqual((await browser('10.78.1.1').signIn('Target', 'target-password')).status, 429);
-  assert.strictEqual((await browser('10.78.1.2').signIn('Ben', 'ben-password')).status, 200, 'other people still get in');
+  const t0 = Date.now();
+  assert.strictEqual((await browser('10.78.1.1').signIn('Target', 'target-password')).status, 200, 'the right password still gets in');
+  assert.ok(Date.now() - t0 >= 900, 'after a slow-down');
+  assert.strictEqual((await browser('10.78.1.2').signIn('Ben', 'ben-password')).status, 200, 'other people are not slowed');
 });
 
 // ---------- who sees what ----------

@@ -14,6 +14,8 @@ const path = require('path');
 const crypto = require('crypto');
 
 const ACCESS_DAYS = 30, REFRESH_DAYS = 365;
+const IDLE_DAYS = 90;              // a key or assistant sign-in nobody used for this long stops working
+const MAX_CLIENTS = 500, REG_PER_HOUR = 20, UNUSED_CLIENT_HOURS = 24;
 const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex');
 const rand = (n = 32) => crypto.randomBytes(n).toString('base64url');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
@@ -30,11 +32,27 @@ module.exports = function makeMcp(h) {
   };
   const saveStore = () => { const t = FILE + '.tmp'; fs.writeFileSync(t, JSON.stringify(store)); fs.renameSync(t, FILE); try { loadedAt = fs.statSync(FILE).mtimeMs; } catch {} };
   fresh();
+  // When an assistant (or key) was last used. An assistant's access and refresh tokens count together,
+  // so one that keeps refreshing, or keeps using its access token, stays connected.
+  const lastUse = () => { const m = new Map();
+    for (const t of Object.values(store.tokens)) { const k = t.kind === 'key' ? t : t.uid + '|' + t.client; m.set(k, Math.max(m.get(k) || 0, t.used || 0, t.at || 0)); }
+    return t => m.get(t.kind === 'key' ? t : t.uid + '|' + t.client) || 0; };
+  const idle = (t, last) => Date.now() - last(t) > IDLE_DAYS * 864e5;
   const tidy = () => {
-    const now = Date.now();
+    const now = Date.now(), last = lastUse();
     for (const [k, c] of Object.entries(store.codes)) if (c.exp < now) delete store.codes[k];
-    for (const [k, t] of Object.entries(store.tokens)) if (t.exp && t.exp < now) delete store.tokens[k];
+    for (const [k, t] of Object.entries(store.tokens)) if ((t.exp && t.exp < now) || idle(t, last)) delete store.tokens[k];
+    // Apps that registered but never got as far as someone signing in go after a day.
+    for (const [id, c] of Object.entries(store.clients)) if (!c.used && now - (c.at || 0) > UNUSED_CLIENT_HOURS * 3600e3) delete store.clients[id];
   };
+  // The list of apps is full: make room by dropping the oldest ones nobody is connected through.
+  const makeRoom = () => {
+    const live = new Set([...Object.values(store.tokens), ...Object.values(store.codes)].map(t => t.client));
+    const spare = Object.entries(store.clients).filter(([id]) => !live.has(id)).sort((a, b) => (a[1].used || a[1].at || 0) - (b[1].used || b[1].at || 0));
+    while (Object.keys(store.clients).length >= MAX_CLIENTS && spare.length) delete store.clients[spare.shift()[0]];
+    return Object.keys(store.clients).length < MAX_CLIENTS;
+  };
+  const regHits = new Map();   // address -> times it registered an app in the last hour
 
   // This app's public address, e.g. https://old-laptop.tail1234.ts.net. Set PUBLIC_URL if it comes out wrong.
   const base = req => {
@@ -67,19 +85,20 @@ module.exports = function makeMcp(h) {
     const t = m ? m[1] : url.searchParams.get('key');
     const rec = t && store.tokens[sha(t)];
     if (!rec || rec.kind === 'refresh' || (rec.exp && rec.exp < Date.now()) || !h.users().users[rec.uid]) return null;
+    if (idle(rec, lastUse())) { tidy(); saveStore(); return null; }
     if (Date.now() - (rec.used || 0) > 3600e3) { rec.used = Date.now(); saveStore(); }   // "last used", at most once an hour
     return rec.uid;
   }
   // How many assistants act as this person, and a way to sign them all out (used by the owner's admin page).
-  const connected = uid => { fresh(); return Object.values(store.tokens).filter(t => t.uid === uid && t.kind !== 'refresh').length; };
+  const connected = uid => { fresh(); const last = lastUse(); return Object.values(store.tokens).filter(t => t.uid === uid && t.kind !== 'refresh' && !idle(t, last)).length; };
   const revoke = uid => { fresh(); let n = 0; for (const [k, t] of Object.entries(store.tokens)) if (t.uid === uid) { delete store.tokens[k]; n++; } if (n) saveStore(); return n; };
   // ---------- each person's own assistants (the "AI assistants" part of the app's settings) ----------
   // One row per assistant that signed in (Claude, Muse...) and one per key. Ids never reveal a token.
   function mine(uid) {
     fresh();
-    const rows = {}, now = Date.now();
+    const rows = {}, now = Date.now(), last = lastUse();
     for (const [k, t] of Object.entries(store.tokens)) {
-      if (t.uid !== uid || (t.exp && t.exp < now)) continue;
+      if (t.uid !== uid || (t.exp && t.exp < now) || idle(t, last)) continue;
       const key = t.kind === 'key', id = key ? 'k_' + k.slice(0, 16) : 'a_' + sha(t.client).slice(0, 16);
       const r = rows[id] = rows[id] || { id, kind: key ? 'key' : 'app', name: key ? (t.label || 'Key made on the laptop') : (store.clients[t.client]?.name || 'An assistant'), since: t.since || t.at, used: 0 };
       r.since = Math.min(r.since, t.since || t.at); r.used = Math.max(r.used, t.used || 0);
@@ -129,22 +148,44 @@ module.exports = function makeMcp(h) {
 :root{--bg:#F5F1E8;--surface:#fff;--ink:#14112A;--muted:#5D5870;--hl:#FFD23F;--owe:#E0243C}
 @media (prefers-color-scheme:dark){:root{--bg:#13111C;--surface:#1E1B2C;--ink:#F1EEFF;--muted:#A9A3C2;--owe:#FF6B7D}}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:16px;background:var(--bg);color:var(--ink);font-family:system-ui,sans-serif}
-form,.box{width:100%;max-width:380px;background:var(--surface);border:2.5px solid var(--ink);border-radius:14px;box-shadow:5px 5px 0 var(--ink);padding:22px}
+form,.box{width:100%;max-width:420px;background:var(--surface);border:2.5px solid var(--ink);border-radius:14px;box-shadow:5px 5px 0 var(--ink);padding:22px}
 h1{margin:0 0 6px;font-size:1.5rem}p{margin:0 0 14px;color:var(--muted)}label{display:block;font-weight:600;font-size:.88rem;color:var(--muted);margin:12px 0 6px}
 input{width:100%;font:inherit;font-size:1rem;padding:12px 14px;border:2.5px solid var(--ink);border-radius:12px;background:var(--surface);color:var(--ink)}
 button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;padding:13px;border:2.5px solid var(--ink);border-radius:12px;background:var(--hl);color:#14112A;box-shadow:3px 3px 0 var(--ink);cursor:pointer}
-.err{color:var(--owe);margin:12px 0 0}</style></head><body>${body}</body></html>`); };
+.err{color:var(--owe);margin:12px 0 0}
+.box form,form.plain{max-width:none;border:0;box-shadow:none;padding:0;background:none}
+.dest{border:2.5px dashed var(--ink);border-radius:12px;padding:10px 12px;margin:0 0 10px;overflow-wrap:anywhere}.dest span{display:block;font-size:.85rem;color:var(--muted)}.dest strong{font-size:1.15rem}
+.small{font-size:.88rem}details{margin-top:16px}summary{cursor:pointer;font-weight:600;color:var(--muted)}a{color:inherit;font-weight:700}</style></head><body>${body}</body></html>`); };
 
-  function authorizeForm(res, q, clientName, err) {
-    const hidden = ['client_id', 'redirect_uri', 'state', 'code_challenge', 'code_challenge_method', 'scope', 'resource']
-      .map(k => `<input type="hidden" name="${k}" value="${esc(q[k])}">`).join('');
-    page(res, err ? 401 : 200, `<form method="post" action="/oauth/authorize">${hidden}
-  <h1>Connect ${esc(clientName || 'an assistant')}</h1>
-  <p>Sign in to let it see your balances and expenses and add expenses for you in Split it.</p>
-  <label for="n">Name</label><input id="n" name="name" autocomplete="username" required>
+  const same = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  const allowToken = (who, q) => sha(['allow', who.key, q.client_id, q.redirect_uri, q.code_challenge].join('|'));
+  // Where the key goes, in words a person can check: the website's address, or "an app on this computer".
+  function destination(uri) {
+    let x; try { x = new URL(uri); } catch { return { where: String(uri), note: '' }; }
+    if (x.protocol === 'https:') return { where: x.host, note: 'the website' };
+    if (x.protocol === 'http:') return { where: x.host, note: 'an app on this computer at' };
+    return { where: x.protocol + '//' + (x.host || x.pathname.split('/')[0]), note: 'an app on this device:' };
+  }
+  function authorizeForm(res, q, client, who, err) {
+    const keys = ['client_id', 'redirect_uri', 'state', 'code_challenge', 'code_challenge_method', 'scope', 'resource'];
+    const hidden = keys.map(k => `<input type="hidden" name="${k}" value="${esc(q[k])}">`).join('');
+    const d = destination(q.redirect_uri), name = client.name || 'an assistant';
+    const here = '/oauth/authorize?' + new URLSearchParams([['response_type', 'code'], ...keys.filter(k => q[k]).map(k => [k, String(q[k])])]);
+    const login = `<label for="n">Name</label><input id="n" name="name" autocomplete="username" required>
   <label for="pw">Password</label><input id="pw" name="password" type="password" autocomplete="current-password" required>
   <label for="cd">Sign-in code <span style="font-weight:400">(only if you turned one on)</span></label><input id="cd" name="code" inputmode="numeric" autocomplete="one-time-code">
-  <button>Sign in and allow</button>${err ? `<p class="err" role="alert">${esc(err)}</p>` : ''}</form>`);
+  <button>Sign in and allow</button>`;
+    page(res, err ? 401 : 200, `<div class="box">
+  <h1>Connect ${esc(name)}</h1>
+  <p>It will be able to see your balances and expenses and add expenses for you in Split it.</p>
+  <div class="dest"><span>Your key will be sent to ${esc(d.note)}</span><strong>${esc(d.where)}</strong></div>
+  <p class="small">Only allow this if you started connecting from there just now. The name above is what the app calls itself; the address is where the key really goes.</p>
+  ${who ? `<form method="post" action="/oauth/authorize">${hidden}<input type="hidden" name="allow" value="${esc(allowToken(who, q))}">
+  <p class="small">Signed in as <b>${esc(who.name)}</b>.</p><button>Allow</button></form>
+  <details><summary>Not you? Sign in as someone else</summary><form method="post" action="/oauth/authorize" class="plain">${hidden}${login}</form></details>`
+  : `<form method="post" action="/oauth/authorize" class="plain">${hidden}${login}</form>
+  <p class="small">Sign in with Google or an email link? <a href="/login?next=${encodeURIComponent(here)}">Sign in to Split it first</a>, then you can allow it with one tap.</p>`}
+  ${err ? `<p class="err" role="alert">${esc(err)}</p>` : ''}</div>`);
   }
 
   async function oauth(req, res, url) {
@@ -162,7 +203,13 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       const m = await readForm(req);
       const uris = Array.isArray(m.redirect_uris) ? m.redirect_uris.map(String) : [];
       if (!uris.length || uris.length > 10 || !uris.every(okRedirect)) return json(res, 400, { error: 'invalid_redirect_uri' });
-      if (Object.keys(store.clients).length > 500) return json(res, 400, { error: 'invalid_client_metadata', error_description: 'too many clients' });
+      const ip = h.clientIp ? h.clientIp(req) : req.socket.remoteAddress, hour = Date.now() - 3600e3;
+      const hits = (regHits.get(ip) || []).filter(t => t > hour);
+      if (hits.length >= REG_PER_HOUR) return json(res, 429, { error: 'slow_down', error_description: 'too many registrations from this address, try again in an hour' }, { 'Retry-After': '3600' });
+      hits.push(Date.now()); regHits.set(ip, hits);
+      if (regHits.size > 5000) for (const [k, v] of regHits) if (!v.some(t => t > hour)) regHits.delete(k);
+      tidy();
+      if (!makeRoom()) return json(res, 503, { error: 'temporarily_unavailable', error_description: 'too many connected apps' });
       const id = 'c_' + rand(12), method = ['client_secret_post', 'client_secret_basic'].includes(m.token_endpoint_auth_method) ? m.token_endpoint_auth_method : 'none';
       const secret = method === 'none' ? null : rand();
       store.clients[id] = { name: String(m.client_name || '').slice(0, 60), redirect_uris: uris, secret: secret && sha(secret), at: Date.now() };
@@ -178,16 +225,26 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       const back = params => { const u = new URL(q.redirect_uri); for (const [k, v] of Object.entries(params)) if (v) u.searchParams.set(k, v); res.writeHead(302, { Location: u.toString(), 'Cache-Control': 'no-store' }); res.end(); };
       if (req.method === 'GET' && q.response_type !== 'code') return back({ error: 'unsupported_response_type', state: q.state });
       if (!q.code_challenge || (q.code_challenge_method || 'plain') !== 'S256') return back({ error: 'invalid_request', error_description: 'PKCE S256 required', state: q.state });
-      if (req.method !== 'POST') return authorizeForm(res, q, c.name);
-      const wait = h.tooManyTries(req);
-      if (wait) return authorizeForm(res, q, c.name, wait);
-      const uid = h.checkLogin(req, q.name, q.password);
-      if (!uid) return authorizeForm(res, q, c.name, 'That name and password don’t match.');
-      if (h.needsCode && h.needsCode(uid)) {
-        const wait2 = h.tooManyTries(req, uid); if (wait2) return authorizeForm(res, q, c.name, wait2);
-        if (!h.checkCode(uid, q.code)) { h.noteMiss(req, uid); return authorizeForm(res, q, c.name, 'Enter the 6-digit code from your authenticator app.'); }
+      const who = h.session ? h.session(req) : null;
+      if (req.method !== 'POST') return authorizeForm(res, q, c, who);
+      let uid;
+      if (q.allow) {
+        // One tap: already signed in to the app in this browser. The form carries a value tied to this sign-in,
+        // this app and this return address, so another page can't post it for you.
+        if (!who || !same(String(q.allow), allowToken(who, q))) return authorizeForm(res, q, c, who, 'That took too long. Try again.');
+        uid = who.uid;
+      } else {
+        const wait = h.tooManyTries(req);
+        if (wait) return authorizeForm(res, q, c, who, wait);
+        uid = await h.checkLogin(req, q.name, q.password);
+        if (!uid) return authorizeForm(res, q, c, who, 'That name and password don’t match.');
+        if (h.needsCode && h.needsCode(uid)) {
+          if (h.slowDown) await h.slowDown(uid);
+          if (!h.checkCode(uid, q.code)) { h.noteMiss(req, uid); return authorizeForm(res, q, c, who, 'Enter the 6-digit code from your authenticator app.'); }
+        }
       }
       tidy();
+      c.used = Date.now();
       const code = rand();
       store.codes[sha(code)] = { uid, client: q.client_id, redirect_uri: q.redirect_uri, challenge: q.code_challenge, exp: Date.now() + 10 * 60e3 };
       saveStore();
@@ -210,12 +267,12 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         uid = rec.uid;
       } else if (m.grant_type === 'refresh_token') {
         const k = sha(m.refresh_token || ''), rec = store.tokens[k];
-        if (!rec || rec.kind !== 'refresh' || rec.client !== m.client_id || rec.exp < Date.now()) return json(res, 400, { error: 'invalid_grant' });
+        if (!rec || rec.kind !== 'refresh' || rec.client !== m.client_id || rec.exp < Date.now() || idle(rec, lastUse())) return json(res, 400, { error: 'invalid_grant' });
         delete store.tokens[k];
         uid = rec.uid; since = rec.since || rec.at;
       } else return json(res, 400, { error: 'unsupported_grant_type' });
       if (!h.users().users[uid]) return json(res, 400, { error: 'invalid_grant' });
-      tidy();
+      tidy(); c.used = Date.now();
       const access = issue(uid, m.client_id, 'access', ACCESS_DAYS, { since }), refresh = issue(uid, m.client_id, 'refresh', REFRESH_DAYS, { since });
       saveStore();
       return json(res, 200, { access_token: access, token_type: 'Bearer', expires_in: ACCESS_DAYS * 86400, refresh_token: refresh, scope: 'split-it' });
