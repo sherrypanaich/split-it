@@ -4276,7 +4276,9 @@ window.addEventListener('hs-dropped', ev => {
 async function signOutHere(el){
   const off = window.HouseSplitOffline, n = off ? off.pending() : 0;
   if(n && !confirmTap(el, `Tap again. ${n} change${n===1?'':'s'} not synced yet will be lost`)) return;
-  if(off) await off.signOut('/api/logout'); else location.href = '/api/logout';
+  if(!off){ location.href = '/api/logout'; return; }
+  try{ await off.signOut('/api/logout'); }
+  catch(e){ toast('You’re offline. Sign out once the laptop can be reached, or you’d still be signed in on this phone.'); }
 }
 document.getElementById('addBtn').onclick = () => {
   if(S.page?.type==='group') openExpense({ctx:{type:'group', id:S.page.id}});

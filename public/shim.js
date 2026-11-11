@@ -174,7 +174,13 @@
     notSaved: () => aside().filter(x => !x.by || !who || x.by === who),
     dismiss: id => setAside(aside().filter(x => x.id !== id)),
     forget,
-    signOut: async (to = '/api/logout') => { await forget(); location.href = to; }
+    // Signing out ends the sign-in on the laptop, so it needs the laptop: offline it throws and nothing is forgotten,
+    // since otherwise the phone would stay signed in (with an empty copy) for whoever picks it up next.
+    signOut: async (to = '/api/logout') => {
+      try { await fetch(to, { redirect: 'manual', cache: 'no-store' }); }
+      catch (e) { throw Object.assign(fail('Signing out needs the laptop', 'unavailable'), { offline: true }); }
+      await forget(); location.href = '/login';
+    }
   };
 
   // ---------- live updates ----------

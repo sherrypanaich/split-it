@@ -187,3 +187,18 @@ test('changes left waiting by the previous release (one change per item) are eac
   assert.strictEqual(p.off.pending(), 0);
   assert.deepStrictEqual(srv.writes.map(w => [w.body.ops[0].op, w.body.ops[0].path]), [['set', 'expenses/e1'], ['update', 'expenses/e1'], ['delete', 'expenses/e2']]);
 });
+
+test('signing out away from the laptop says so and forgets nothing, since the phone would stay signed in', async () => {
+  const srv = laptop(), p = phone(srv.handle);
+  await (await p.user()).id();
+  const db = await p.db();
+  srv.up = false;
+  await db.doc('expenses/e1').set(expense('Pizza', 2400));
+  await assert.rejects(p.off.signOut(), e => e.offline === true);
+  assert.strictEqual(p.off.pending(), 1, 'still waiting');
+  assert.strictEqual(p.ctx.location.href, '/');
+  srv.up = true;
+  await p.off.signOut();
+  assert.strictEqual(p.off.pending(), 0);
+  assert.strictEqual(p.ctx.location.href, '/login');
+});
