@@ -160,7 +160,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
 .err{color:var(--owe);margin:12px 0 0}
 .box form,form.plain{max-width:none;border:0;box-shadow:none;padding:0;background:none}
 .dest{border:2.5px dashed var(--ink);border-radius:12px;padding:10px 12px;margin:0 0 10px;overflow-wrap:anywhere}.dest span{display:block;font-size:.85rem;color:var(--muted)}.dest strong{font-size:1.15rem}
-.small{font-size:.88rem}details{margin-top:16px}summary{cursor:pointer;font-weight:600;color:var(--muted)}a{color:inherit;font-weight:700}</style></head><body>${body}</body></html>`); };
+.small{font-size:.88rem}details{margin-top:16px}summary{cursor:pointer;font-weight:600;color:var(--muted);padding:10px 0}a{color:inherit;font-weight:700}</style></head><body>${body}</body></html>`); };
 
   const same = (a, b) => a.length === b.length && crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
   const allowToken = (who, q) => sha(['allow', who.key, q.client_id, q.redirect_uri, q.code_challenge].join('|'));

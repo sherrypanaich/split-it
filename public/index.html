@@ -271,7 +271,7 @@ nav.tabs .add svg{width:26px;height:26px}
 @keyframes up{from{transform:translateY(60px);opacity:.3}to{transform:none;opacity:1}}
 @media (prefers-reduced-motion:reduce){.sheet{animation:none}.thinking i{animation:none}}
 .sheet .head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
-.sheet h3{margin:0;font-size:1.3rem;font-weight:800;letter-spacing:-.01em;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sheet h3{margin:0;font-size:1.3rem;font-weight:800;letter-spacing:-.01em;min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:break-word}
 .close{background:var(--surface);border:1px solid var(--line);border-radius:999px;width:36px;height:36px;font-size:1rem;flex:none}
 .sheet .foot{position:sticky;bottom:calc(-20px - env(safe-area-inset-bottom,0px));background:var(--bg);margin:18px -16px calc(-20px - env(safe-area-inset-bottom,0px));
   padding:12px 16px calc(14px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line);display:flex;gap:10px}
@@ -400,6 +400,22 @@ nav.tabs .add{background:var(--hl);color:#14112A;border:3px solid var(--edge);bo
 .settle.mine{background:var(--accent-soft)}
 .chart rect[fill="var(--accent)"]{stroke:var(--edge);stroke-width:2}
 .bar{border:1.5px solid var(--edge);height:9px}
+/* comfortable tap targets (at least 40px) and no clipped labels on a phone */
+.btn.sm{min-height:40px}
+a.btn{text-decoration:none;display:inline-block}
+a.btn.sm{display:inline-flex;align-items:center}
+.close{width:40px;height:40px}
+.chip.sm{min-height:40px}
+.seg button{min-height:40px;white-space:normal;line-height:1.15}
+.colors button{width:40px;height:40px}
+details>summary{padding:10px 0;cursor:pointer}
+.sheet .foot .btn{min-width:0;padding-left:8px;padding-right:8px;overflow:hidden;text-overflow:ellipsis}
+.sheet .foot:has(>.btn:nth-child(4)) .btn{flex:1 1 auto}   /* Edit · Copy · Favourite · Delete: each as wide as its word */
+.health .stat .v{white-space:normal;overflow-wrap:break-word}
+#acctBox .row .m:not(.ell){white-space:normal}
+.warnlist{margin:0;padding-left:18px}.warnlist li+li{margin-top:6px}
+.netpill .nsbtn{min-height:40px;padding:6px 12px}
+.sec-h .link,.ctxbar .link,#twoOn,.cursel{min-height:40px}
 
 
 /* ===== dashboard ===== */
@@ -825,6 +841,8 @@ const monthLabel = (ym, short) => { const [y,m]=ym.split('-').map(Number); retur
 const monthName = ym => monthLabel(ym).split(' ')[0];
 const dayLabel = d => { if(!d) return ''; if(d===today()) return 'Today'; const y=new Date(); y.setDate(y.getDate()-1);
   if(d===dateStr(y)) return 'Yesterday'; return new Date(d+'T12:00:00').toLocaleDateString('en-CA',{month:'short',day:'numeric'}); };
+// with the year when it isn't this year: "Jul 14, 2025"
+const dayLabelY = d => { const l = dayLabel(d); return d && /^\d{4}-/.test(d) && d.slice(0,4)!==today().slice(0,4) && !/day$/.test(l) ? l+', '+d.slice(0,4) : l; };
 const whenLabel = t => { if(!t) return ''; const l = dayLabel(dateStr(new Date(t))); return l==='Today'||l==='Yesterday' ? l.toLowerCase() : 'on '+l; };
 const newId = p => (p||'x') + Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-3);
 const hash = s => { let h = 2166136261; for(const c of String(s)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return h >>> 0; };
@@ -1142,16 +1160,18 @@ document.addEventListener('click', e => { const b = e.target.closest && e.target
   const ho = e.target.closest && e.target.closest('[data-handover]'); if(ho) openHandOver(JSON.parse(ho.dataset.handover)); });
 // What the server said, when it said it as { error, code } (shim.js may pass it on as text).
 const errInfo = e => { try{ const d = JSON.parse(e?.message||''); return d && typeof d==='object' ? d : {}; }catch(_){ return {}; } };
-const STALE_MSG = 'This changed since you opened it, have a look again';
+// The laptop's own reason, when it is a sentence for people ("Only Ana, who made this group, can rename it"), not a code word
+const serverWords = e => { const m = String(e?.message||'').trim(); return m && m.length < 240 && !/^(not allowed|bad \w+|not found\b|forbidden|internal server error|network error|failed to fetch|signed out)/i.test(m) && !/^[{<]/.test(m) ? m : ''; };
+const STALE_MSG = 'Someone else changed this while you had it open. Have a look and try again.';
 let lastStale = false;   // the last write was refused because someone else changed the entry first
 async function write(fn, quiet){
   lastStale = false;
   try{ await fn(); return true; }
   catch(e){
     if(e?.code==='stale' || errInfo(e).code==='stale'){ lastStale = true; if(!quiet) toast(STALE_MSG); }
-    else if(e?.code==='invalid_argument'){ if(!quiet) toast(errInfo(e).error || 'You don’t have permission to change that'); }
+    else if(e?.code==='invalid_argument'){ if(!quiet) toast(errInfo(e).error || serverWords(e) || 'You don’t have permission to change that'); }
     else if(e?.code==='failed_precondition'){ if(!quiet) toast(e.message || 'That can’t be saved as it is'); }
-    else if(e?.code==='unavailable'){ await new Promise(r=>setTimeout(r,600+Math.random()*600)); try{ await fn(); return true; }catch(_){ if(!quiet) toast('Couldn’t save. Check your connection'); } }
+    else if(e?.code==='unavailable'){ await new Promise(r=>setTimeout(r,600+Math.random()*600)); try{ await fn(); return true; }catch(e2){ if(!quiet) toast(/[.!]$/.test(e2?.message||'') && serverWords(e2) || 'Couldn’t save. Check your connection'); } }
     else if(e?.code==='quota_exceeded'){ if(!quiet) toast('Storage is full. Delete old entries to make room'); }
     else if(!quiet) toast('Couldn’t save. Try again');
     return false;
@@ -1488,7 +1508,7 @@ function renderProfileSetup(){
 }
 function openProfile(){
   const p = S.people[myUid]; let color = p.color||0, char = ART[p.char] ? p.char : (p.char===null||p.char==='' ? '' : myChar());
-  openSheet(head('Your profile') + `<div class="pair">${av(myUid,'lg')}<div><div style="font-weight:600">${esc(nameOf(myUid))}</div><div class="note" style="margin:2px 0 0">${LAPTOP?`Signed in as ${esc(S.prof[myUid]?.name||'you')} · <a href="/api/logout" class="link" id="signOut" style="padding:0">Sign out</a>`:'Signed in with your Claude account'}</div></div></div>
+  openSheet(head('Your profile') + `<div class="pair">${av(myUid,'lg')}<div><div style="font-weight:600">${esc(nameOf(myUid))}</div><div class="note" style="margin:2px 0 0">${LAPTOP?`Signed in as ${esc(S.prof[myUid]?.name||'you')} · <a href="/api/logout" class="link" id="signOut" style="display:inline-block;padding:11px 4px;margin:-11px -4px">Sign out</a>`:'Signed in with your Claude account'}</div></div></div>
     <label class="f" for="nk">What people call you</label><input class="in" id="nk" maxlength="24" value="${esc(p.nickname||'')}" placeholder="${esc(S.prof[myUid]?.name||'Your account name')}">
     <label class="f">Your guide</label>${charPicker(char)}
     <label class="f">Colour</label><div class="colors">${COLORS.map((c,i)=>`<button data-col="${i}" style="background:${c}" aria-label="Colour ${i+1}" aria-pressed="${i===color}"></button>`).join('')}</div>
@@ -1615,7 +1635,7 @@ async function drawAssistants(box){
   const row = x => `<div class="row"><div class="body"><div class="t ell">${esc(x.name)}</div><div class="m" style="white-space:normal">${x.kind==='key'?'Key made':'Connected'} ${ago(x.since)} · ${x.used?'last used '+ago(x.used):'not used yet'}</div></div><button class="btn sm" data-ai-off="${esc(x.id)}">Disconnect</button></div>`;
   box.innerHTML = `<p class="note" style="margin-top:0">Ask Claude, Muse or ChatGPT “what do I owe?” or “add $54 groceries to House”. Add Split it to your assistant as a connector with your link. It signs in as you, so it sees only what you see here and adds things as you.</p>
     <div class="cbox"><label for="aiUrl" class="sr">Connector link</label><input class="in" id="aiUrl" readonly value="${esc(a.url)}"><button class="btn" id="aiCopy">Copy</button></div>
-    <details class="note" style="margin:10px 0 0"><summary style="cursor:pointer;font-weight:600">How to add it to Claude</summary>
+    <details class="note" style="margin:4px 0 0"><summary style="font-weight:600">How to add it to Claude</summary>
       <ol style="margin:6px 0 0;padding-left:20px"><li>In Claude, open Settings, then Connectors, and tap Add custom connector.</li><li>Name it Split it and paste your link.</li><li>Tap Connect. Split it opens: sign in with your own name and password and tap Allow.</li><li>In a chat, turn Split it on in the tools menu.</li></ol>
       <p style="margin:6px 0 0">Muse and ChatGPT work the same way. If your assistant asks for an API key or token instead, make a key below.</p></details>
     ${a.list.length ? `<div class="card" style="margin-top:10px">${a.list.map(row).join('')}</div>` : `<p class="note">No assistants connected yet.</p>`}
@@ -1637,7 +1657,7 @@ async function drawAssistants(box){
       try{ const r = await api('/api/assistants/key', { name: form.querySelector('#aiName').value });
         const withKey = r.url + '?key=' + encodeURIComponent(r.key);
         form.innerHTML = `<div class="card" style="padding:12px 14px;margin-top:10px"><div class="t" style="font-weight:800">Your key</div>
-          <p class="note" style="margin:6px 0 8px">Copy it now. It won’t be shown again. Paste it where your assistant asks for an API key or bearer token, with the link above as the server address.</p>
+          <p class="note" style="margin:6px 0 8px">Copy it now. It won’t be shown again. Paste it where your assistant asks for an API key or token, with the link above as the address.</p>
           <div class="cbox"><label for="aiK" class="sr">Key</label><input class="in" id="aiK" readonly value="${esc(r.key)}"><button class="btn" id="aiKc">Copy</button></div>
           <p class="note">Only if it has no place for a key: <button class="link" id="aiKl" style="padding:0">copy the link with the key in it</button>. Keep that link private.</p>
           <button class="btn primary block" id="aiDone" style="margin-top:10px">I copied it</button></div>`;
@@ -1937,7 +1957,7 @@ function openClaim(c){
     <div class="card" style="margin-top:12px">${parts}</div>
     <p style="margin:14px 2px 4px;font-weight:700">Altogether, ${you(pv.total||0)}</p>
     <label class="f">What moves to you (${pv.count})</label>
-    <div class="card">${(pv.items||[]).map(i => `<div class="row"><div class="body"><div class="t ell">${esc(i.title)}</div><div class="m">${esc(i.date)} · ${esc(i.where)}${i.photo?' · receipt':''}</div></div><div class="r"><b>${money(i.amount)}</b>${i.yours?`<small class="${amtClass(i.kind==='payment'?i.yours:-i.yours)}">${i.kind==='payment'?(i.yours>0?'you paid':'paid to you'):'your share '+money(Math.abs(i.yours))}</small>`:''}</div></div>`).join('')}</div>
+    <div class="card">${(pv.items||[]).map(i => `<div class="row"><div class="body"><div class="t ell">${esc(i.title)}</div><div class="m">${esc(dayLabelY(i.date))} · ${esc(i.where)}${i.photo?' · receipt':''}</div></div><div class="r"><b>${money(i.amount)}</b>${i.yours?`<small class="${amtClass(i.kind==='payment'?i.yours:-i.yours)}">${i.kind==='payment'?(i.yours>0?'you paid':'paid to you'):'your share '+money(Math.abs(i.yours))}</small>`:''}</div></div>`).join('')}</div>
     ${pv.count > (pv.items||[]).length ? `<p class="note">And ${pv.count - pv.items.length} more.</p>` : ''}
     <p class="note">Yes moves all of it to your account, and ${esc(c.byName)} sees the same balances you do. Either of you can undo it for 7 days. If it isn’t you, nothing moves.</p>
     <div class="foot"><button class="btn" id="no">Not me</button><button class="btn primary" id="yes">Yes, that’s me</button></div>`, sh => {
@@ -2319,14 +2339,14 @@ function openCalendar(gid, ym){
     cells += `<span class="d${its.length?' has':''}${ds===td?' today':''}" ${its.length?`data-day="${ds}" role="button" tabindex="0"`:''}>${d}${its.length?`<span class="n">${its.length}</span>`:''}</span>`; }
   const row = it => `<div class="row"><span class="ic">${it.kind==='bill'?catIcon(it.cat):icon('household')}</span><div class="body"><div class="t">${esc(it.title)}</div><div class="m">${esc(it.sub)}</div></div><span class="pill${it.date<=addDaysS(td,2)?' soon':''}">${it.date===td?'Today':it.date===addDaysS(td,1)?'Tomorrow':new Date(it.date+'T12:00:00').toLocaleDateString('en-CA',{month:'short',day:'numeric'})}</span></div>`;
   openSheet(head(`${gid?esc(S.groups[gid].name)+' calendar':'Bills calendar'}`) + `
-    <div class="sec-h" style="margin-top:4px"><button class="link" id="calPrev" aria-label="Previous month">‹</button><h2>${monthLabel(ym)}</h2><button class="link" id="calNext" aria-label="Next month">›</button></div>
+    <div class="sec-h" style="margin-top:4px"><button class="icon-btn" id="calPrev" aria-label="Previous month">${BACK}</button><h2>${monthLabel(ym)}</h2><button class="icon-btn" id="calNext" aria-label="Next month" style="transform:scaleX(-1)">${BACK}</button></div>
     <div class="cal">${['S','M','T','W','T','F','S'].map(d=>`<span class="dow">${d}</span>`).join('')}${cells}</div>
     <div id="calDay"></div>
     <label class="f">Next 30 days</label>${soon.length?`<div class="card">${soon.map(row).join('')}</div>`:'<div class="empty">Nothing due in the next 30 days.</div>'}
     <label class="f">Put it in your phone’s calendar</label>
-    <div style="display:flex;gap:8px;flex-wrap:wrap">${LAPTOP?`<button class="btn" id="calSub">Subscribe (stays up to date)</button>`:''}<button class="btn" id="calIcs">Download .ics</button></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">${LAPTOP?`<button class="btn" id="calSub">Subscribe (stays up to date)</button>`:''}<button class="btn" id="calIcs">Download a copy</button></div>
     <div id="calSubBox"></div>
-    <p class="note">${LAPTOP?'Subscribe gives you a private link your calendar app checks on its own, so new bills show up by themselves. The .ics file is a one-time copy.':'The .ics file opens in Apple Calendar, Google Calendar or Outlook.'}</p>`, sh => {
+    <p class="note">${LAPTOP?'Subscribe gives you a private link your calendar app checks on its own, so new bills show up by themselves. A copy is a one-time file that opens in Apple Calendar, Google Calendar or Outlook.':'The file opens in Apple Calendar, Google Calendar or Outlook.'}</p>`, sh => {
     sh.querySelector('#calPrev').onclick = () => openCalendar(gid, prevYm(ym)); sh.querySelector('#calNext').onclick = () => openCalendar(gid, nextYm(ym));
     sh.querySelectorAll('[data-day]').forEach(el => { const show = () => { const its = byDay[el.dataset.day]||[]; sh.querySelector('#calDay').innerHTML = `<label class="f">${dayLabel(el.dataset.day)==='Today'?'Today':new Date(el.dataset.day+'T12:00:00').toLocaleDateString('en-CA',{weekday:'long',month:'long',day:'numeric'})}</label><div class="card">${its.map(row).join('')}</div>`; };
       el.onclick = show; el.onkeydown = e => { if(e.key==='Enter'||e.key===' '){ e.preventDefault(); show(); } }; });
@@ -2337,11 +2357,11 @@ function openCalendar(gid, ym){
     const showSub = async fresh => { sub.disabled = true;
       try{ const r = await fetch('/api/calendar', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({fresh:!!fresh})}); const d = await r.json(); if(!r.ok) throw new Error(d.error||'');
         const web = d.url.replace(/^https?:/, 'webcal:');
-        sh.querySelector('#calSubBox').innerHTML = `<div class="cbox" style="margin-top:8px"><input class="in" id="calUrl" readonly value="${esc(d.url)}"><button class="btn" id="calCopy">Copy</button></div>
+        sh.querySelector('#calSubBox').innerHTML = `<div class="cbox" style="margin-top:8px"><label for="calUrl" class="sr">Calendar link</label><input class="in" id="calUrl" readonly value="${esc(d.url)}"><button class="btn" id="calCopy">Copy</button></div>
           <p class="note">iPhone: open <a href="${esc(web)}">this link</a> and tap Subscribe. Google Calendar: Other calendars, From URL, paste it. Anyone with the link can see your bills, so keep it to yourself.</p>
-          <button class="btn sm" id="calNew">Make a new link</button><p class="note" id="calNewNote">Shared it by mistake? A new link stops the old one working. Your calendar app then needs the new one.</p>`;
+          <p class="note" id="calNewNote">Shared it by mistake? Make a new link and this one stops working. Your calendar app then needs the new one.</p><button class="btn block" id="calNew" style="margin-top:4px">Make a new link</button>`;
         sh.querySelector('#calCopy').onclick = () => copy(d.url, 'Calendar link copied'); sh.querySelector('#calUrl').onfocus = e => e.target.select();
-        const nb = sh.querySelector('#calNew'); nb.onclick = () => { if(nb.dataset.armed!=='1'){ nb.dataset.armed='1'; nb.textContent='Tap again: the old link stops working'; return; } showSub(true).then(ok => ok && toast('New link made. The old one no longer works')); };
+        const nb = sh.querySelector('#calNew'); nb.onclick = () => { if(!confirmTap(nb, 'Tap again: the old link stops working')) return; showSub(true).then(ok => ok && toast('New link made. The old one no longer works')); };
         return true;
       }catch(e){ toast('Couldn’t make the link'); sub.disabled = false; return false; } };
     if(sub) sub.onclick = () => showSub(false);
@@ -2468,14 +2488,14 @@ function openGroupEditor(gid){
   const status = m => m.id===myUid ? 'You' : m.active===false ? 'Moved out' : m.kind==='guest' ? 'Not on the app' : 'On Split it';
   const memberRow = m => { const b = net[m.id]||0;
     return `<button class="row" data-m="${esc(m.id)}">${av(m.id,'',gid)}<div class="body"><div class="t ell">${esc(nameOf(m.id))}</div><div class="m">${status(m)}</div></div>
-      <div class="r"><b class="${amtClass(b)}">${b?signed(b):'$0'}</b></div><span class="chev">›</span></button>`; };
+      <div class="r"><b class="${amtClass(b)}">${b?signed(b):esc(CUR_SIGN)+'0'}</b></div><span class="chev">›</span></button>`; };
   openSheet(head(isNew?'New group':'Group settings') + `
     <label class="f">Icon</label><div class="chips">${GROUP_ICONS.map(e=>`<button class="chip iconchip" data-emo="${e}" aria-label="${e}">${icon(e)}</button>`).join('')}</div>
     <label class="f" for="gn">Name</label><input class="in" id="gn" maxlength="40" value="${esc(g?.name||'')}" placeholder="e.g. Bridge St house, Montreal trip" autocomplete="off"${runsIt?'':' readonly aria-readonly="true" style="opacity:.7"'}>
     ${runsIt?'':`<p class="note">Only ${esc(nameOf(g.createdBy))}, who made the group, can rename it or move other people out.</p>`}
     ${!isNew?`<label class="f">Members</label><div class="card">${groupMembers(gid).map(memberRow).join('')}</div>`:''}
     ${!isNew && g.createdBy===myUid && heirs.length?`<label class="f">Hand the group over</label><div class="chips">${heirs.map(id=>`<button class="chip" data-handto="${esc(id)}">${av(id,'sm',gid)}<span class="ell" style="max-width:9em">${esc(nameOf(id))}</span></button>`).join('')}</div>
-      <p class="note" id="handNote">You made this group, so you rename it and decide who moves out. Moving away? Pass that on to someone still in it.</p>`:''}
+      <p class="note" id="handNote" aria-live="polite">You made this group, so you rename it and decide who moves out. Moving away? Pass that on to someone still in it.</p>`:''}
     <label class="f">${isNew?'Who’s in it? Tap your friends':'Add friends'}</label>
     ${others.length?`<div class="chips">${others.map(id=>`<button class="chip" data-add="${esc(id)}">${av(id,'sm')}<span class="ell" style="max-width:9em">${esc(nameOf(id))}</span></button>`).join('')}</div>
       ${others.some(id=>!S.people[id])?'<p class="note">Friends not on the app join the group by name, so everyone in the group sees their name.</p>':''}`
@@ -2833,7 +2853,8 @@ function openExpense(opts={}){
   openSheet(head(title) + (pre?.ai?`<span class="ai-tag">${icon('sparkle','tiny')} ${pre.receipt?'Read from your receipt':'Filled in for you'}. Check it, then save.</span>`:'') + `
     <div class="ctxbar"><span class="mut">With</span><b class="ell">${esc(ctxTitle(ctx))}</b>${!ex&&!bill?'<button class="link" id="chg">Change</button>':''}</div>
     <div id="amtBlock"><label class="f" for="amt">Amount</label>
-      <div class="amount-wrap"><select id="cur" aria-label="Currency" class="cursel">${CURRENCIES.map(c=>`<option ${c===st.cur?'selected':''}>${c}</option>`).join('')}</select><input id="amt" inputmode="decimal" placeholder="0.00" autocomplete="off" value="${esc(st.amount)}"></div>
+      <div class="amount-wrap"><select id="cur" aria-label="Currency" class="cursel">${CURRENCIES.map(c=>`<option ${c===st.cur?'selected':''}>${c}</option>`).join('')}</select><input id="amt" inputmode="decimal" placeholder="0.00" autocomplete="off" value="${esc(st.amount)}" aria-describedby="amtN"></div>
+      <p class="note bad" id="amtN" role="alert" hidden style="margin:6px 2px 0"></p>
       <div class="raterow" id="rateRow"><span>1 <b id="rcur"></b> =</span><input id="rate" inputmode="decimal" placeholder="1.39" value="${esc(st.rate)}" aria-label="Exchange rate"><span>${HOME}</span><b class="mut" id="conv"></b></div>
       <div class="raterow" id="feeRow"><label for="fee">Card fee</label><input id="fee" inputmode="decimal" value="${esc(String(st.fee))}" style="width:64px"><span>%</span><span class="mut">Use 0 for cash</span></div>
       <p class="note" id="rateNote" hidden style="margin:6px 2px 0"></p></div>
@@ -2891,6 +2912,9 @@ function openExpense(opts={}){
       const typedAmts = [...(st.mode==='items' ? [...st.items.map(it=>it.p), st.tax, st.tip] : (st.repeat&&st.variable) ? [] : [$('#amt').value]), ...(st.two && !st.repeat && !st.refund ? [st.paid2] : [])];
       const badAmt = typedAmts.find(amtBad);
       if(badAmt!==undefined){ msg = amtMsg(badAmt); bad=true; }
+      // say it right under the amount box too, where the eye is (the split note is further down)
+      const amtWrong = amtBad($('#amt').value) && !(st.repeat&&st.variable), an = $('#amtN');
+      if(an){ an.hidden = !amtWrong; if(an.textContent !== (amtWrong ? amtMsg($('#amt').value) : '')) an.textContent = amtWrong ? amtMsg($('#amt').value) : ''; $('#amt').setAttribute('aria-invalid', amtWrong ? 'true' : 'false'); }
       else if((st.mode==='exact'||st.mode==='items') && st.repeat){ msg='Bills can be split equally, by shares or by %.'; bad=true; }
       else if(st.cur!==HOME && st.repeat){ msg=`Bills are in ${HOME}.`; bad=true; }
       else if(st.cur!==HOME && !rate()){ msg=`Enter how many ${HOME} one ${st.cur} is worth.`; bad=true; }
@@ -2905,6 +2929,7 @@ function openExpense(opts={}){
       else if(st.two && !st.repeat && !st.refund && !(toCents(st.paid2) > 0 && toCents(st.paid2) < a)){ msg=`Enter how much ${firstName(st.paidBy2)} paid. It has to be less than the total.`; bad=true; }
       else if(n===1 && Object.keys(sp)[0]===st.paidBy && !st.two) msg = `Only the person who paid is in this, so nobody owes anything.`;
       else msg = st.mode==='items' ? `Tax and tip are shared in proportion to what each person ordered.` : n===1 ? `${youOr(Object.keys(sp)[0])} ${Object.keys(sp)[0]===myUid?'owe':'owes'} all of it.` : `Split ${n} ways.`;
+      if(amtWrong && msg===amtMsg($('#amt').value)) msg = 'Fix the amount above to see everyone’s share.';
       $('#sn').textContent = msg; $('#sn').className = 'note'+(bad?' bad':'');
       const ok = (!!a || (st.repeat&&st.variable)) && !bad && !!$('#ttl').value.trim();
       $('#save').disabled = !ok; return {a, inp, ok};
@@ -3170,7 +3195,7 @@ function openDetail(id, priv){
   } else {
     const [,,lab] = catOf(e.category), needs = e.status==='needs_amount';
     const rule = ({shares:'by shares', exact:'by exact amounts', pct:'by percentage', items:'by items'})[e.splitMode] || 'equally';
-    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} ${HOME}${e.orig.fee?`, includes ${e.orig.fee}% card fee`:''}${e.orig.rateDate?` (rate from ${e.orig.rateDate})`:''}`:'', e.pair?`Part ${e.pair.n} of a ${money(e.pair.total)} bill two people paid`:'', `${lab}, ${dayLabel(e.date)}`, e.amount<0 ? `Money in. ${youOr(e.paidBy)} got it, shared ${rule}` : `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
+    const meta = [`${ctxLabel(e)}`, e.orig?`Paid ${fmtCur(e.orig.amount, e.orig.cur)} at 1 ${e.orig.cur} = ${e.orig.rate} ${HOME}${e.orig.fee?`, includes ${e.orig.fee}% card fee`:''}${e.orig.rateDate?` (rate from ${dayLabel(e.orig.rateDate).replace(/^(Today|Yesterday)$/, w => w.toLowerCase())})`:''}`:'', e.pair?`Part ${e.pair.n} of a ${money(e.pair.total)} bill two people paid`:'', `${lab}, ${dayLabel(e.date)}`, e.amount<0 ? `Money in. ${youOr(e.paidBy)} got it, shared ${rule}` : `${youOr(e.paidBy)} paid, split ${rule}`, e.recurringId?'From a monthly bill':'Added by '+by(e.addedBy, e.createdAt), e.editedAt?'Edited by '+by(e.editedBy, e.editedAt):''].filter(Boolean).join('. ');
     body = `<p class="detail-amt">${needs?'Needs amount':e.amount<0?'+'+money(-e.amount):money(e.amount)}</p><p class="note" style="margin:6px 0 0">${esc(meta)}.</p>
       ${e.note?`<p class="banner" style="margin:12px 0 0">${esc(e.note)}</p>`:''}${delNote}
       ${e.photo&&LAPTOP?`<a class="rphoto" href="/api/photo/${esc(e.photo)}" target="_blank" rel="noopener"><img src="/api/photo/${esc(e.photo)}" alt="Receipt photo" loading="lazy"><span>Receipt photo · tap to open</span></a>`:''}
@@ -4008,8 +4033,8 @@ async function openAdmin(){
   openSheet(head('Run Split it') + `
     <div id="admUpdate"></div>
     ${alerts.map(a => `<div class="banner" role="alert">${esc(a.text)}${a.dismiss?' <button class="link" data-dismiss style="padding:0">Got it</button>':''}</div>`).join('')}
-    ${warn.length?`<div class="banner">${warn.map(esc).join('<br>')}</div>`:''}
-    <label class="f">Health</label><div class="health">${stat('v'+esc(hh.version), 'Split it on Node '+esc(hh.node))}${stat(ago(Date.now()-hh.uptime).replace(' ago','').replace('just now','a moment'), 'running for')}${stat(fmtBytes(hh.dbBytes), hh.docs+' records')}${stat(hh.photos, 'receipt photos, '+fmtBytes(hh.photoBytes))}${hh.disk?stat(fmtBytes(hh.disk.free), 'free on disk'+(hh.disk.used!=null?` (${Math.round(hh.disk.used*100)}% used)`:'')):''}${stat(ago(hh.lastBackupAt), 'last backup')}${stat(esc(hh.timeZone||'?'), 'server time zone')}${hh.copyDir?stat(hh.copyAt?ago(hh.copyAt):'not yet', 'copy off the laptop'):''}${stat(ago(hh.lastBillRun), 'bills checked')}${stat(hh.listeners, 'phones open now')}</div>
+    ${warn.length?`<div class="banner">${warn.length===1?esc(warn[0]):`<ul class="warnlist">${warn.map(w=>`<li>${esc(w)}</li>`).join('')}</ul>`}</div>`:''}
+    <label class="f">Health</label><div class="health">${stat('v'+esc(hh.version), 'Split it on Node '+esc(hh.node))}${stat(ago(Date.now()-hh.uptime).replace(' ago','').replace('just now','a moment'), 'running for')}${stat(fmtBytes(hh.dbBytes), hh.docs+' records')}${stat(hh.photos, 'receipt photos, '+fmtBytes(hh.photoBytes))}${hh.disk?stat(fmtBytes(hh.disk.free), 'free on disk'+(hh.disk.used!=null?` (${Math.round(hh.disk.used*100)}% used)`:'')):''}${stat(ago(hh.lastBackupAt), 'last backup')}${stat(esc(hh.timeZone||'?').replace('/','/<wbr>'), 'server time zone')}${hh.copyDir?stat(hh.copyAt?ago(hh.copyAt):'not yet', 'copy off the laptop'):''}${stat(ago(hh.lastBillRun), 'bills checked')}${stat(hh.listeners, 'phones open now')}</div>
     <p class="note">${hh.email?'Email is on.':'Email is off.'} ${hh.google?'Google sign-in is on.':'Google sign-in is off.'} Reminders go out after ${hh.remindHour}:00 server time (${esc(hh.timeZone||'')}, now ${esc((hh.serverTime||'').slice(11).replace(/^(\d\d)(\d\d)$/,'$1:$2'))}). Money is kept in ${esc(hh.homeCurrency||HOME)} (HOME_CURRENCY in split-it.env). ${hh.ratesDate?`Trip exchange rates are from ${esc(hh.ratesDate)}${hh.ratesError?`; the rate service isn’t answering (${esc(hh.ratesError)})`:''}.`:''} Data lives in <span style="word-break:break-all">${esc(hh.dataDir)}</span>.</p>
     <label class="f">People (${o.people.length})${o.invites?` · ${o.invites} open invite${o.invites===1?'':'s'}`:''}</label>
     <div class="card">${o.people.map(p => `<button class="row" data-adm="${esc(p.id)}">${av(p.id)}<div class="body"><div class="t ell">${esc(p.nickname||p.name)}${p.owner?' <small class="mut">owner</small>':''}</div><div class="m">${p.lastSeen?'Seen '+ago(p.lastSeen):'Never opened it'}${p.push?' · phone alerts on':''}${p.mcp?' · '+p.mcp+' assistant'+(p.mcp===1?'':'s'):''}${p.code?' · sign-in code on':''}${!p.hasPassword&&!p.google&&!p.email?' · no way to sign in yet':''}</div></div><span class="chev">›</span></button>`).join('')}</div>
@@ -4176,8 +4201,8 @@ async function migrate(){
 document.getElementById('tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if(b) go(b.dataset.tab); });
 // Offline: a small pill says so, counts the changes waiting to reach the laptop, and says when it last caught up.
 // Changes the laptop couldn't take show up there too, and on Home, until you redo or dismiss them.
-const syncedLabel = t => { if(!t) return ''; const d = new Date(t), tm = d.toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
-  return d.toDateString() === new Date().toDateString() ? tm : d.toLocaleDateString([], {month:'short', day:'numeric'}) + ', ' + tm; };
+const syncedLabel = t => { if(!t) return ''; const d = new Date(t), tm = d.toLocaleTimeString('en-CA', {hour:'numeric', minute:'2-digit'});
+  return d.toDateString() === new Date().toDateString() ? tm : d.toLocaleDateString('en-CA', {month:'short', day:'numeric'}) + ', ' + tm; };
 const notSavedList = () => { try{ return window.HouseSplitOffline?.notSaved?.() || []; }catch(e){ return []; } };
 function netPill(){
   const off = window.HouseSplitOffline, pend = off ? off.pending() : 0, offline = off ? off.offline() : false, ns = notSavedList().length;
@@ -4224,7 +4249,7 @@ function whyNotSaved(it){
   if(it.code==='not_found') return 'It was removed in the meantime.';
   return m || 'The laptop wouldn’t take it.';
 }
-const notSavedText = it => `${describeChange(it)} couldn’t be saved: ${whyNotSaved(it)}`;
+const notSavedText = it => `${describeChange(it)} wasn’t saved. ${whyNotSaved(it)}`;
 // Redo: an expense opens its form again, filled in with what you entered. Anything else is simply sent again.
 function redoChange(it){
   window.HouseSplitOffline?.dismiss(it.id); netPill(); if(S.tab==='home' && !S.page) schedule();
@@ -4233,9 +4258,9 @@ function redoChange(it){
   if(ops.length===1 && o && o.op!=='delete' && entryOp(o)){
     const s = o.path.split('/'), cur = entryNow(s[s.length-1]), e = o.op==='set' ? {...o.data} : {...(cur||{}), ...o.data};
     if(e.kind==='expense' && e.title!=null && !e.deletedAt && e.status!=='needs_amount'){
-      const sp = e.split || {}, keys = Object.keys(sp), foreign = e.orig && e.orig.cur && e.orig.cur!=='CAD';
+      const sp = e.split || {}, keys = Object.keys(sp), foreign = e.orig && e.orig.cur && e.orig.cur!==HOME;
       const prefill = { title:e.title||'', amount:Math.abs(foreign ? e.orig.amount : e.amount)||0, paidBy:e.paidBy, cat:e.category, date:e.date, note:e.note||'', photo:e.photo||null,
-        cur: foreign ? e.orig.cur : 'CAD', ids: e.splitMode==='equal' && keys.length ? keys : null,
+        cur: foreign ? e.orig.cur : HOME, ids: e.splitMode==='equal' && keys.length ? keys : null,
         exact: e.splitMode!=='equal' && !foreign && e.amount>0 && keys.length ? sp : null };
       if(cur) openExpense({existing:cur, prefill});
       else openExpense({ctx: ctxOf({...e, people:e.people||[e.paidBy, ...keys], _priv: s[0]==='data'}), prefill, refund: e.amount<0});
