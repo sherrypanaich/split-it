@@ -103,7 +103,13 @@ test('updating from the last release: the new service worker takes over, old cop
       { op: 'update', path: 'expenses/e_seed', data: { deletedAt: Date.now(), deletedBy: uid } }
     ])), [ana.uid, day()]);
 
+    const sub = n => ({ endpoint: 'https://push.example/' + n, keys: { p256dh: 'x', auth: 'y' } });
+    assert.strictEqual((await h.api(ben.cookie, 'POST', '/api/push/subscribe', sub('ben-phone'))).status, 200);
     await h.stop(); await h.start();
+    // sign-ins from before (kept hashed now) still work, for notifications too, and old subscriptions are kept
+    assert.deepStrictEqual((await h.api(ben.cookie, 'GET', '/api/push/who')).data.uids, [ben.uid]);
+    assert.strictEqual((await h.api(ana.cookie, 'POST', '/api/push/subscribe', sub('ana-phone'))).status, 200);
+    assert.deepStrictEqual((await h.api(ben.cookie, 'GET', '/api/push/who')).data.uids.sort(), [ana.uid, ben.uid].sort());
     const writes = [];
     page.on('response', r => { if (r.request().method() === 'POST' && /\/api\/(write|batch)$/.test(r.url())) writes.push(r.status() + ' ' + r.request().postData()); });
     await page.reload(); await signedIn(page);
@@ -297,8 +303,13 @@ test('published as a Claude artifact (no shim.js): it starts, and the laptop-onl
     browser = await pw.chromium.launch();
     const ctx = await browser.newContext({ viewport: { width: 390, height: 800 } });
     await ctx.addInitScript(ARTIFACT);
-    // no outside hosts here: the rate service just doesn't answer
-    await ctx.route(/^https?:\/\/(?!127\.0\.0\.1)/, r => r.abort());
+    // The receipt reader comes from jsdelivr here (checked by hash): play the CDN with the copy the laptop serves
+    const VENDOR = path.join(ROOT, 'public', 'vendor', 'tesseract'), cdn = [];
+    await ctx.route(/^https:\/\/cdn\.jsdelivr\.net\//, r => { const name = r.request().url().split('/').pop(), f = path.join(VENDOR, name); cdn.push(name);
+      return fs.existsSync(f) ? r.fulfill({ status: 200, headers: { 'Access-Control-Allow-Origin': '*', 'Content-Type': name.endsWith('.js') ? 'application/javascript' : 'application/octet-stream' }, body: fs.readFileSync(f) })
+        : r.fulfill({ status: 404, headers: { 'Access-Control-Allow-Origin': '*' }, body: '' }); });
+    // no other outside hosts here: the rate service just doesn't answer
+    await ctx.route(/^https?:\/\/(?!127\.0\.0\.1|cdn\.jsdelivr\.net)/, r => r.abort());
     const page = await ctx.newPage(), errors = watch(page), local = [];
     page.on('request', r => { const u = new URL(r.url()); if (u.origin === B && u.pathname !== '/' && !u.pathname.startsWith('/art/')) local.push(u.pathname); });
     page.setDefaultTimeout(8000);
@@ -332,6 +343,14 @@ test('published as a Claude artifact (no shim.js): it starts, and the laptop-onl
     const prof = await sheet();
     assert.match(prof, /Signed in with your Claude account/);
     assert.doesNotMatch(prof, /Sign out|Phone notifications|AI assistants|People, backups and health|Download my data/);
+    await close();
+    // read a receipt on the phone
+    const png = await page.evaluate(() => { const c = document.createElement('canvas'); c.width = 600; c.height = 320; const x = c.getContext('2d');
+      x.fillStyle = '#fff'; x.fillRect(0, 0, 600, 320); x.fillStyle = '#000'; x.font = '32px monospace';
+      ['FRESH MARKET', 'Bananas        3.50', 'Bread          4.25', 'TOTAL          7.75'].forEach((l, i) => x.fillText(l, 30, 60 + i * 60)); return c.toDataURL('image/png').split(',')[1]; });
+    await page.setInputFiles('#receipt', { name: 'receipt.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') });
+    await page.waitForFunction(() => /Who’s this receipt with/.test(document.querySelector('.sheet')?.innerText || ''), null, { timeout: 60000 });
+    assert.ok(cdn.includes('tesseract.min.js') && cdn.includes('eng.traineddata.gz'), cdn.join(' '));
     await close();
     assert.strictEqual(await page.$('#netpill'), null);
     assert.deepStrictEqual(local, [], 'nothing asked of a laptop server that isn’t there');
