@@ -175,7 +175,7 @@ function localCommand({ cmd, name, password }) {
     if (String(password || '').length < 8) return { text: 'Too short, nothing saved.' };
     const clean = String(name).trim().replace(/\s+/g, ' ').slice(0, 30);
     users.users['u_' + crypto.randomBytes(11).toString('hex')] = { name: clean, owner: !Object.keys(users.users).length, createdAt: Date.now(), ...hashPw(String(password)) };
-    saveUsers();
+    saveUsers(); accounts.ensureTags();
     return { text: `Added ${clean}. They can sign in now.` };
   }
   if (!found) return { text: `No user called ${name}.` };
@@ -516,7 +516,7 @@ function zipRead(buf) {   // -> { name: Buffer }, understands stored and deflate
 function backupZip() {
   flushDb();
   const entries = [];
-  for (const f of ['db.json', 'users.json', 'push.json', 'push-keys.json', 'oauth.json']) { const fp = path.join(DATA_DIR, f); if (fs.existsSync(fp)) entries.push({ name: f, data: fs.readFileSync(fp) }); }
+  for (const f of ['db.json', 'users.json', 'push.json', 'push-keys.json', 'oauth.json', 'claims.json']) { const fp = path.join(DATA_DIR, f); if (fs.existsSync(fp)) entries.push({ name: f, data: fs.readFileSync(fp) }); }
   for (const f of fs.readdirSync(PHOTO_DIR)) if (f.endsWith('.jpg')) entries.push({ name: 'photos/' + f, data: fs.readFileSync(path.join(PHOTO_DIR, f)) });
   entries.push({ name: 'README.txt', data: Buffer.from(`Split it backup, ${new Date().toISOString()}\nTo restore: in the app, tap your picture, Run Split it, Restore a backup. Or stop the server and copy these files into its data folder.\n`) });
   return zipWrite(entries);
@@ -540,6 +540,7 @@ function restoreZip(buf) {
   if (files['push-keys.json']) { try { const k = JSON.parse(files['push-keys.json'].toString('utf8')); if (k.publicKey && k.privateJwk) { fs.writeFileSync(PUSH_KEYS_FILE, files['push-keys.json']); pushKeys = push.loadKeys(PUSH_KEYS_FILE); } } catch {} }
   if (files['push.json']) { try { pushes = JSON.parse(files['push.json'].toString('utf8')); savePushes(); } catch {} }
   if (files['oauth.json']) fs.writeFileSync(path.join(DATA_DIR, 'oauth.json'), files['oauth.json']);
+  if (files['claims.json']) { fs.writeFileSync(path.join(DATA_DIR, 'claims.json'), files['claims.json']); claims.reload(); }
   let photos = 0;
   for (const [name, data] of Object.entries(files)) if (/^photos\/[a-f0-9]{24}\.jpg$/.test(name)) { fs.writeFileSync(path.join(PHOTO_DIR, name.slice(7)), data); photos++; }
   tellEveryone('reload', { why: 'restore' });
@@ -1002,6 +1003,8 @@ async function handle(req, res) {
 
   if (p === '/' || p === '/index.html') return file(res, 'index.html', null, 'private, no-cache');
   if (p === '/shim.js') return file(res, 'shim.js', null, 'private, no-cache');
+  if (p === '/qr.js') return file(res, 'qr.js', null, 'private, max-age=86400');
+  if (await claims(req, res, url, uid)) return;   // taking over history logged before you joined (claims.js)
 
   // ---------- receipt photos ----------
   if (p === '/api/photo' && req.method === 'POST') {
@@ -1209,7 +1212,13 @@ async function handle(req, res) {
 
 const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it.env', cookieName: 'hs', tagline: 'by Budget it',
   users: () => users, saveUsers, endSessions, docs: () => db.docs, saveDb, broadcast, hashPw, findUser,
-  setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, slowDown, nameFor, readBody, send, file, secure, SESSION_DAYS });
+  setCookie, cookies, clientIp, misses, noteMiss, tooManyTries, slowDown, nameFor, readBody, send, file, secure, SESSION_DAYS,
+  notify: (uids, msg) => notify(uids, msg), inviteInfo: inv => claims.forInvite(inv), onJoin: (inv, id) => claims.onJoin(inv, id), cancelClaim: id => claims.cancelById(id) });
+
+// Taking over history someone logged under your name before you joined: see claims.js
+const refreshFor = uids => { for (const [res, who] of listeners) if (uids.includes(who)) res.write('event: refresh\ndata: {}\n\n'); };
+const claims = require('./claims')({ DATA_DIR, docs: () => db.docs, users: () => users, saveDb, saveUsers, broadcast, refresh: refreshFor,
+  notify: (uids, msg) => notify(uids, msg).catch(e => console.error(e)), nameFor, segs, memberOf, cad, readBody, send });
 
 // AI assistant connector (Muse, Claude...): see mcp.js
 const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, allDebts, sharedEntries, netOf,

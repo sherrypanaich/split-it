@@ -62,6 +62,10 @@ node server.js add-user Sam
 It asks for a password (8 characters or more). The first person added is the owner.
 
 To bring in friends, open the app, go to **Friends**, tap **Add friend**, then **Make an invite link**. Send them the link. They pick their own name and password, and you're friends right away. Each link works once and lasts 7 days. Anyone signed in can make invite links. You can still add people by hand with `node server.js add-user NAME`.
+
+**Someone you've been tracking by name?** Open their page (a contact in Friends, or a name-only member of a group) and tap **Invite … to Split it** or **Hand over …'s history**. Their invite link carries that history: once they've joined, they see what's waiting and tap **Yes, that's me**. Already on Split it? Send it to them instead, and they get the same choice. Nothing moves until they say yes. Every balance stays exactly the same, and either of you can undo it for 7 days. Anyone in a group can hand over that group's name-only member, and the group is told.
+
+**Finding people already on Split it.** Everyone has a unique tag, like `@sam`, in their profile under Signing in. In **Add friend**, type someone's tag (or the email they checked on their account) and they get a friend request to accept. Your profile also has a friend link with a QR code: anyone who opens it becomes your friend right away. Split it doesn't use phone numbers, because there's no free way to check that a number is really yours. With more than 15 people on one Split it, Add friend stops listing everyone and you search by tag instead.
 Forgot a password? `node server.js set-password Alex`. See everyone: `node server.js list-users`. Someone moved out? `node server.js remove-user Alex` signs them out everywhere and turns off their notifications; their past expenses stay. `node server.js code-off Alex` turns off their sign-in code if they lost their phone. These all work while the app is running and take effect right away, no restart needed.
 
 ## 4. Try it

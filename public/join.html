@@ -56,7 +56,11 @@ const post = body => fetch('/api/join', { method:'POST', headers:{'Content-Type'
   const r = await post({}).catch(() => null);
   const d = r ? await r.json().catch(() => ({})) : {};
   if (!r || !r.ok) { lead.innerHTML = (d.error || 'Couldn’t check this invite.') + ' Already have an account? <a href="/login">Sign in</a>.'; return; }
-  lead.textContent = `${d.from} invited you to split bills together. Pick a name and password to join.`;
+  const w = d.waiting;
+  lead.textContent = w && w.expenses
+    ? `${d.from} invited you to split bills together. You two already have ${w.expenses} ${w.expenses === 1 ? 'entry' : 'entries'}${w.groups === 1 ? ' and a group' : w.groups > 1 ? ` and ${w.groups} groups` : ''} on Split it, waiting for you to take over. Pick a name and password to see them.`
+    : `${d.from} invited you to split bills together. Pick a name and password to join.`;
+  if (w && w.name) document.getElementById('n').value = w.name;
   fields.hidden = false; document.getElementById('n').focus();
   if (d.google) { document.getElementById('gBox').hidden = false; document.getElementById('gJoin').href = '/auth/google?mode=join&invite=' + encodeURIComponent(token); }
 })();

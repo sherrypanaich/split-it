@@ -240,6 +240,7 @@ button.row.card{border:1px solid var(--line);border-radius:18px}
 
 /* chips & seg */
 .chips{display:flex;flex-wrap:wrap;gap:8px}
+.qrbox{display:grid;place-items:center;margin:12px auto 0;width:min(220px,70vw)}.qrbox svg{width:100%;height:auto;border-radius:12px;border:2.5px solid var(--edge,var(--line))}
 .chip{border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:8px 13px;display:inline-flex;gap:7px;align-items:center;font-size:.92rem;white-space:nowrap;flex:none}
 .chip[aria-pressed="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
 .chip:disabled{opacity:.5}
@@ -959,7 +960,7 @@ function friendParts(fid){
   for(const g of myGroups(true)) if(groupMembers(g.id).some(m=>m.id===fid)){ const a = groupPlan(g.id).reduce((s,p)=> s + (p.from===fid&&p.to===myUid ? p.amount : p.from===myUid&&p.to===fid ? -p.amount : 0), 0); if(a) parts.push({ctx:{type:'group',id:g.id}, label:g.name, gid:g.id, amount:a}); }
   const d = isContact(fid) ? 0 : pairAmount(directEntries(fid), fid);
   if(d) parts.push({ctx:{type:'friend',id:fid}, label:'Outside groups', amount:d});
-  const pv = pairAmount(privateEntries(fid), fid);
+  const pv = pairAmount(privateEntries(fid).filter(e => !e.carried), fid);   // handed over: counted in the shared "carried over" line
   if(pv) parts.push({ctx:{type:'friend',id:fid, priv:true}, label: isContact(fid) ? 'Outside groups' : 'Your private notes', amount:pv});
   return parts;
 }
@@ -1109,7 +1110,8 @@ async function makeInvite(btn){
     box.querySelector('#invUrl').onfocus = e => e.target.select();
   } catch(e){ toast(e.message || 'Couldn’t make a link'); btn.disabled = false; }
 }
-document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('#mkInv'); if(b) makeInvite(b); });
+document.addEventListener('click', e => { const b = e.target.closest && e.target.closest('#mkInv'); if(b) makeInvite(b);
+  const ho = e.target.closest && e.target.closest('[data-handover]'); if(ho) openHandOver(JSON.parse(ho.dataset.handover)); });
 async function write(fn, quiet){
   try{ await fn(); return true; }
   catch(e){
@@ -1475,7 +1477,9 @@ async function drawAccount(box){
     : `<div class="row"><div class="body"><div class="t">Google</div><div class="m">Sign in with one tap.</div></div><a class="btn sm" href="/auth/google?mode=link">Connect</a></div>`;
   const pwRow = `<div class="row"><div class="body"><div class="t">Password</div><div class="m">${a.hasPassword?'Set':'Not set. You sign in with Google or email'}</div></div><button class="btn sm" id="acPw">${a.hasPassword?'Change':'Set one'}</button></div>`;
   const codeRow = `<div class="row"><div class="body"><div class="t">Sign-in code</div><div class="m">${a.code?`On · ${a.backupCodes} backup code${a.backupCodes===1?'':'s'} left`:'Off. A second step from an authenticator app.'}</div></div><button class="btn sm" id="acCode">${a.code?'Turn off':'Turn on'}</button></div>`;
-  box.innerHTML = `<div class="card">${emailRow}${googleRow}${pwRow}${codeRow}</div><div id="acForm"></div>
+  const tagRow = `<div class="row"><div class="body"><div class="t">Your tag</div><div class="m">${a.tag?'@'+esc(a.tag)+' · friends on Split it find you with it':'Not set'}</div></div><button class="btn sm" id="acTag">Change</button></div>
+    <div class="row"><div class="body"><div class="t">Friend link</div><div class="m">A QR code people scan to add you</div></div><button class="btn sm" id="acFl">Show</button></div>`;
+  box.innerHTML = `<div class="card">${tagRow}${emailRow}${googleRow}${pwRow}${codeRow}</div><div id="acForm"></div>
     <button class="btn block" id="acOut" style="margin-top:10px">Sign out on all devices</button>`;
   const form = box.querySelector('#acForm');
   const ask = (html, go) => { form.innerHTML = `<div class="card" style="padding:12px 14px;margin-top:10px">${html}<p class="note" id="acErr" role="alert"></p></div>`;
@@ -1483,6 +1487,11 @@ async function drawAccount(box){
     form.querySelector('[data-go]').onclick = async e => { const b = e.currentTarget, err = form.querySelector('#acErr'); b.disabled = true; err.textContent = '';
       try{ await go(); }catch(x){ err.textContent = x.message; b.disabled = false; } };
     const c = form.querySelector('[data-cancel]'); if(c) c.onclick = () => { form.innerHTML = ''; }; };
+  box.querySelector('#acFl').onclick = () => openFriendLink();
+  box.querySelector('#acTag').onclick = () => ask(`<label class="f" for="acT" style="margin-top:0">Your tag</label><input class="in" id="acT" autocapitalize="off" autocomplete="off" maxlength="21" value="${esc(a.tag?'@'+a.tag:'')}">
+      <p class="note">3 to 20 letters, numbers or _. Your old tag stops working.</p>
+      <div class="foot" style="position:static;padding:10px 0 0"><button class="btn" data-cancel>Cancel</button><button class="btn primary" data-go>Save</button></div>`,
+    async () => { const r = await api('/api/account/tag', { tag: form.querySelector('#acT').value }); toast('You’re @'+r.tag+' now'); drawAccount(box); });
   const ee = box.querySelector('#acEmailEdit');
   // An email can reset the password, so changing it asks for the password (or a sign-in code) first.
   if(ee) ee.onclick = () => ask(`<label class="f" for="acE" style="margin-top:0">Your email</label><input class="in" id="acE" type="email" autocomplete="email" inputmode="email" value="${esc(a.pendingEmail||a.email||'')}">
@@ -1769,11 +1778,228 @@ function openChore(gid, id){
   });
 }
 
+/* ================= people already on Split it, and history logged before someone joined (laptop version) =================
+   @tags and friend requests: find someone by their exact @tag or checked email, and they accept.
+   A friend link (or its QR code) adds you both right away: sharing it is the yes.
+   Hand-overs: a contact or a name-only group member you logged things for becomes a real person on the app.
+   You send it as a personal invite link or as a request; they see what's waiting and say yes or "not me".
+   The server moves it all in one step, checks every balance stays the same, and either of you can undo it for 7 days. */
+const BIG_HOUSE = 15;   // more people than this, and Add a friend searches by tag instead of listing everyone
+S.inbox = { claims:[], sent:[], got:[], freqIn:[], freqOut:[], invites:[], at:0 };
+async function loadInbox(force){
+  if(!LAPTOP || !myUid || (!force && Date.now() - S.inbox.at < 15000)) return;
+  S.inbox.at = Date.now();
+  try{
+    const [c, f] = await Promise.all([api('/api/claims'), api('/api/friends/requests')]);
+    const sig = JSON.stringify([c.incoming.map(x=>x.id+x.status), f.incoming.map(x=>x.id)]);
+    const was = S.inbox.sig;
+    Object.assign(S.inbox, { claims:c.incoming, sent:c.sent, got:c.got, freqIn:f.incoming, freqOut:f.outgoing, sig });
+    if(sig !== was) schedule();
+  }catch(e){}
+}
+if(LAPTOP){ document.addEventListener('visibilitychange', () => { if(!document.hidden) loadInbox(); }); setInterval(() => { if(!document.hidden) loadInbox(); }, 60000); }
+const plural = (n, one, many) => `${n} ${n===1?one:(many||one+'s')}`;
+const loadQr = () => window.qrSvg ? Promise.resolve() : new Promise((ok, no) => { const s = document.createElement('script'); s.src = '/qr.js'; s.onload = ok; s.onerror = no; document.head.appendChild(s); });
+async function qrInto(el, text){ try{ await loadQr(); el.innerHTML = window.qrSvg(text); }catch(e){ el.innerHTML = '<p class="note">The QR code didn’t load. Copy the link instead.</p>'; } }
+const linkBox = (url, msg, note) => `<div class="cbox"><label for="lkUrl" class="sr">Link</label><input class="in" id="lkUrl" readonly value="${esc(url)}"><button class="btn" id="lkCopy">Copy</button></div>
+  ${navigator.share?'<button class="btn primary block" id="lkShare" style="margin-top:8px">Send it…</button>':''}
+  <div class="qrbox" id="lkQr" aria-label="QR code for the link"></div><p class="note">${note}</p>`;
+function bindLinkBox(sh, url, msg){
+  sh.querySelector('#lkCopy').onclick = () => copy(msg, 'Copied. Paste it in a message');
+  const s = sh.querySelector('#lkShare'); if(s) s.onclick = () => navigator.share({ title:'Split it', text: msg }).catch(()=>{});
+  sh.querySelector('#lkUrl').onfocus = e => e.target.select();
+  qrInto(sh.querySelector('#lkQr'), url);
+}
+
+/* -------- Home: requests waiting for you -------- */
+const NOT_THEM = 'hs-notthem';
+const notThem = () => { try{ return JSON.parse(lsGet(NOT_THEM)||'[]'); }catch(e){ return []; } };
+// name-only people you track whose first name matches someone on the app: maybe they joined
+function nameMatches(){
+  if(!LAPTOP) return [];
+  const accts = Object.keys(S.people).filter(id => id!==myUid), skip = new Set(notThem()), out = [];
+  const pending = new Set(S.inbox.sent.filter(c=>c.status==='open').map(c=>c.name.toLowerCase()));
+  const cand = [...S.privFriends.filter(f=>f.kind==='contact').map(f=>({key:'c:'+f.id, name:f.name, contact:f.id})),
+    ...myGroups().flatMap(g => groupMembers(g.id).filter(m=>m.kind==='guest' && m.active!==false).map(m=>({key:`g:${g.id}:${m.id}`, name:m.name||'', guest:{gid:g.id, id:m.id}, group:g.name})))];
+  for(const c of cand){
+    const first = (c.name||'').split(' ')[0].toLowerCase(); if(!first || skip.has(c.key) || pending.has((c.name||'').toLowerCase())) continue;
+    const a = accts.find(id => firstName(id).toLowerCase() === first); if(a) out.push({...c, to:a});
+  }
+  return out.slice(0, 2);
+}
+function inboxCards(){
+  if(!LAPTOP) return '';
+  const rows = [];
+  for(const c of S.inbox.claims) rows.push(`<div class="todo"><div class="line">${av(c.by)}<div class="body"><div class="t">${esc(c.byName)} has history for you</div>
+    <div class="m">${c.preview && !c.preview.error ? `${plural(c.preview.count,'entry','entries')} logged before you joined${c.preview.groups.length?`, and a place in ${esc(c.preview.groups.map(g=>g.name).join(', '))}`:''}.` : 'Something changed since it was sent.'}</div></div></div>
+    <div class="acts"><button class="btn sm primary" data-claim-open="${esc(c.id)}">Have a look</button></div></div>`);
+  for(const r of S.inbox.freqIn) rows.push(`<div class="todo"><div class="line">${av(r.uid)}<div class="body"><div class="t">${esc(r.name)} wants to be friends</div><div class="m">@${esc(r.tag||'')}</div></div></div>
+    <div class="acts"><button class="btn sm primary" data-freq="${esc(r.id)}|1">Accept</button><button class="btn sm" data-freq="${esc(r.id)}|0">Ignore</button></div></div>`);
+  for(const m of nameMatches()) rows.push(`<div class="todo"><div class="line">${av(m.to)}<div class="body"><div class="t">Is ${esc(nameOf(m.to))} your ${esc(m.name)}?</div>
+    <div class="m">${esc(nameOf(m.to))} is on Split it. ${m.contact?`You track a ${esc(m.name)} privately.`:`${esc(m.name)} in ${esc(m.group)} isn’t on the app.`} If it’s the same person, they can take over that history.</div></div></div>
+    <div class="acts"><button class="btn sm primary" data-match="${esc(JSON.stringify(m))}">Send it to them</button><button class="btn sm" data-notthem="${esc(m.key)}">Not them</button></div></div>`);
+  return rows.length ? `<div class="sec-h"><h2>Waiting for you</h2></div><div class="card">${rows.join('')}</div>` : '';
+}
+document.addEventListener('click', async e => {
+  const t = e.target.closest && e.target.closest('[data-claim-open],[data-freq],[data-match],[data-notthem]'); if(!t) return;
+  if(t.dataset.claimOpen){ const c = S.inbox.claims.find(x=>x.id===t.dataset.claimOpen); if(c) openClaim(c); return; }
+  if(t.dataset.freq){ const [id, yes] = t.dataset.freq.split('|'); t.disabled = true;
+    try{ await api('/api/friends/answer', { id, yes: yes==='1' }); toast(yes==='1' ? 'You’re friends now' : 'Ignored'); }catch(x){ toast(x.message); }
+    loadInbox(true); return; }
+  if(t.dataset.match){ const m = JSON.parse(t.dataset.match); openHandOver({ contact:m.contact, guest:m.guest, to:m.to }); return; }
+  if(t.dataset.notthem){ lsSet(NOT_THEM, JSON.stringify([...notThem(), t.dataset.notthem].slice(-100))); schedule(); }
+});
+
+/* -------- a hand-over waiting for you: look, then yes or not me -------- */
+function openClaim(c){
+  const pv = c.preview || {};
+  if(pv.error) return openSheet(head('History from '+esc(c.byName)) + `<p>${esc(pv.error)}</p><p class="note">Ask ${esc(c.byName)} to send it again.</p>
+    <div class="foot"><button class="btn" data-close>Close</button><button class="btn" id="no">Dismiss</button></div>`, sh => {
+      sh.querySelector('#no').onclick = async () => { try{ await api('/api/claims/answer', { id:c.id, yes:false }); }catch(e){} closeSheet(); loadInbox(true); }; });
+  const you = v => v>0 ? `you’re owed ${money(v)}` : v<0 ? `you owe ${money(-v)}` : 'settled';
+  const parts = [...(pv.groups||[]).map(g => `<div class="row"><div class="body"><div class="t ell">${esc(g.name)}</div><div class="m">${plural(g.entries,'entry','entries')} as “${esc(g.as)}”. You join the group.</div></div><div class="r"><b class="${amtClass(g.balance)}">${you(g.balance)}</b></div></div>`),
+    pv.oneOnOne ? `<div class="row"><div class="body"><div class="t">Just you and ${esc(c.byName)}</div><div class="m">${plural(pv.oneOnOne.expenses,'expense')}${pv.oneOnOne.payments?`, ${plural(pv.oneOnOne.payments,'payment')}`:''}${pv.oneOnOne.carried?`, plus one “carried over” line for ${plural(pv.oneOnOne.carried,'expense')} with other people`:''}</div></div><div class="r"><b class="${amtClass(pv.oneOnOne.balance)}">${you(pv.oneOnOne.balance)}</b></div></div>` : ''].join('');
+  openSheet(head('Is this you?') + `<div class="pair">${av(c.by,'lg')}<div><div style="font-weight:600">${esc(c.byName)} logged this for “${esc(c.name)}”</div><div class="note" style="margin:2px 0 0">before you were on Split it</div></div></div>
+    <div class="card" style="margin-top:12px">${parts}</div>
+    <p style="margin:14px 2px 4px;font-weight:700">Altogether, ${you(pv.total||0)}</p>
+    <label class="f">What moves to you (${pv.count})</label>
+    <div class="card">${(pv.items||[]).map(i => `<div class="row"><div class="body"><div class="t ell">${esc(i.title)}</div><div class="m">${esc(i.date)} · ${esc(i.where)}${i.photo?' · receipt':''}</div></div><div class="r"><b>${money(i.amount)}</b>${i.yours?`<small class="${amtClass(i.kind==='payment'?i.yours:-i.yours)}">${i.kind==='payment'?(i.yours>0?'you paid':'paid to you'):'your share '+money(Math.abs(i.yours))}</small>`:''}</div></div>`).join('')}</div>
+    ${pv.count > (pv.items||[]).length ? `<p class="note">And ${pv.count - pv.items.length} more.</p>` : ''}
+    <p class="note">Yes moves all of it to your account, and ${esc(c.byName)} sees the same balances you do. Either of you can undo it for 7 days. If it isn’t you, nothing moves.</p>
+    <div class="foot"><button class="btn" id="no">Not me</button><button class="btn primary" id="yes">Yes, that’s me</button></div>`, sh => {
+    sh.querySelector('#no').onclick = async e => { if(!confirmTap(e.currentTarget, 'Tap again: it’s not me')) return;
+      try{ await api('/api/claims/answer', { id:c.id, yes:false }); closeSheet(); toast(`Got it. We told ${c.byName}`); }catch(x){ toast(x.message); } loadInbox(true); };
+    sh.querySelector('#yes').onclick = async e => { const b = e.currentTarget; b.disabled = true; b.textContent = 'Moving it…';
+      try{ await api('/api/claims/answer', { id:c.id, yes:true }); closeSheet(); celebrate('It’s all yours now'); }
+      catch(x){ toast(x.message); b.disabled = false; b.textContent = 'Yes, that’s me'; } loadInbox(true); };
+  });
+}
+
+/* -------- handing history over: from a contact's page or a name-only group member -------- */
+function openHandOver({ contact, guest, to } = {}){
+  if(!LAPTOP) return;
+  const base = contact ? (S.privFriends.find(f=>f.id===contact)?.name||'') : (groupMembers(guest.gid).find(m=>m.id===guest.id)?.name||'');
+  const first = base.split(' ')[0].toLowerCase();
+  // every name-only record you have for that first name, so one hand-over covers them all
+  const opts = [...S.privFriends.filter(f=>f.kind==='contact' && (f.id===contact || f.name.split(' ')[0].toLowerCase()===first)).map(f=>({key:'c:'+f.id, label:`${f.name}, your private contact`, contact:f.id, on:!guest || f.id===contact})),
+    ...myGroups().filter(g => groupMembers(g.id).some(m=>m.id===myUid && m.kind==='account'))
+      .flatMap(g => groupMembers(g.id).filter(m => m.kind==='guest' && (guest ? (m.id===guest.id && g.id===guest.gid) || (m.name||'').split(' ')[0].toLowerCase()===first : (m.name||'').split(' ')[0].toLowerCase()===first))
+      .map(m => ({key:`g:${g.id}:${m.id}`, label:`${m.name} in ${g.name}`, guest:{gid:g.id, id:m.id}, on:true})))];
+  const seenG = new Set(); for(const o of opts) if(o.guest){ if(seenG.has(o.guest.gid)) o.on = false; seenG.add(o.guest.gid); }
+  let target = to || null;
+  const pick = () => { const sel = opts.filter(o=>o.on); return { contact: sel.find(o=>o.contact)?.contact, guests: sel.filter(o=>o.guest).map(o=>o.guest) }; };
+  openSheet(head(`Hand over ${esc(base)}’s history`) + `<p style="margin:0 0 6px">When ${esc(base)} joins, or if they’re already on Split it, they can take over what you logged for them. They say yes first.</p>
+    <label class="f">What it covers</label><div class="chips" id="hoOpts">${opts.map((o,i)=>`<button class="chip" data-ho="${i}" aria-pressed="${o.on}">${esc(o.label)}</button>`).join('')}</div>
+    <div id="hoPrev" class="note" aria-live="polite">Checking…</div>
+    <label class="f">Who gets it</label><div class="seg" id="hoHow"><button data-how="link" aria-pressed="${!target}">Not on Split it yet</button><button data-how="acct" aria-pressed="${!!target}">On Split it</button></div>
+    <div id="hoBody"></div>`, sh => {
+    const prevBox = sh.querySelector('#hoPrev'), body = sh.querySelector('#hoBody');
+    let how = target ? 'acct' : 'link';
+    const preview = async () => { const t = pick(); if(!t.contact && !t.guests.length){ prevBox.textContent = 'Pick at least one.'; return; }
+      try{ const d = await api('/api/claims', { ...t, dry:true }), pv = d.preview;
+        const notes = pv.oneOnOne && (pv.oneOnOne.notes || pv.oneOnOne.photos);
+        prevBox.innerHTML = `They’ll see <b>${plural(pv.count,'entry','entries')}</b>${pv.groups.length?` and join ${esc(pv.groups.map(g=>g.name).join(', '))}`:''}. ${pv.total<0?`They owe ${money(-pv.total)} in all.`:pv.total>0?`They’re owed ${money(pv.total)} in all.`:'They’re settled.'}${notes?' Notes and receipt photos on your one-on-ones go with them.':''}${pv.oneOnOne?.carried?` ${plural(pv.oneOnOne.carried,'expense')} with other people too ${pv.oneOnOne.carried===1?'stays':'stay'} yours, and they get one “carried over” line for their part.`:''}`;
+      }catch(x){ prevBox.textContent = x.message; } };
+    const drawBody = () => {
+      if(how === 'link'){ body.innerHTML = `<p class="note" style="margin-top:0">You get a link for ${esc(base)}. They make an account with it and see what’s waiting. It works once, for 7 days.</p>
+          <button class="btn primary block" id="hoLink">Make the invite link</button>`;
+        body.querySelector('#hoLink').onclick = async e => { const b = e.currentTarget; b.disabled = true;
+          try{ const d = await api('/api/claims', { ...pick(), link:true }), url = location.origin + '/join#t=' + d.token;
+            const msg = `Join me on Split it. What we’ve split so far is waiting for you: ${url}`;
+            body.innerHTML = linkBox(url, msg, `Works once, for the next 7 days. Nothing moves until ${esc(base)} says yes.`); bindLinkBox(body, url, msg);
+            sh.querySelectorAll('[data-ho],[data-how]').forEach(x=>x.disabled = true); loadInbox(true);
+          }catch(x){ toast(x.message); b.disabled = false; } };
+        return; }
+      const near = Object.keys(S.people).filter(id => id!==myUid && firstName(id).toLowerCase()===first);
+      body.innerHTML = `${near.length?`<div class="chips">${near.map(id=>`<button class="chip" data-to="${esc(id)}" aria-pressed="${id===target}">${av(id,'sm')}${esc(nameOf(id))}</button>`).join('')}</div>`:''}
+        <div class="cbox" style="margin-top:8px"><label for="hoQ" class="sr">Their @tag or email</label><input class="in" id="hoQ" placeholder="@tag or email" autocapitalize="off" autocomplete="off"><button class="btn" id="hoFind">Find</button></div>
+        <p class="note" id="hoWho">${target?`Sending to ${esc(nameOf(target))}.`:'Pick them, or type their @tag. They can find it in their profile.'}</p>
+        <button class="btn primary block" id="hoSend" ${target?'':'disabled'}>Send it to them</button>`;
+      const setTo = (id, label) => { target = id; body.querySelector('#hoWho').textContent = `Sending to ${label||nameOf(id)}.`; body.querySelector('#hoSend').disabled = false;
+        body.querySelectorAll('[data-to]').forEach(x=>x.setAttribute('aria-pressed', x.dataset.to===id)); };
+      body.querySelectorAll('[data-to]').forEach(x => x.onclick = () => setTo(x.dataset.to));
+      const find = async () => { const q = body.querySelector('#hoQ').value.trim(); if(!q) return;
+        try{ const d = await api('/api/people/find', { q }); setTo(d.uid, `${d.name} (@${d.tag})`); }catch(x){ body.querySelector('#hoWho').textContent = x.message; } };
+      body.querySelector('#hoFind').onclick = find; body.querySelector('#hoQ').onkeydown = ev => { if(ev.key==='Enter'){ ev.preventDefault(); find(); } };
+      body.querySelector('#hoSend').onclick = async e => { const b = e.currentTarget; b.disabled = true;
+        try{ await api('/api/claims', { ...pick(), to:target }); closeSheet(); toast(`Sent. ${nameOf(target)} says yes or no next time they open Split it`); loadInbox(true); }
+        catch(x){ toast(x.message); b.disabled = false; } };
+    };
+    sh.querySelectorAll('[data-ho]').forEach(b => b.onclick = () => { const o = opts[+b.dataset.ho]; o.on = !o.on;
+      if(o.on && o.guest) opts.forEach(x => { if(x!==o && x.guest && x.guest.gid===o.guest.gid) x.on = false; });
+      if(o.on && o.contact) opts.forEach(x => { if(x!==o && x.contact) x.on = false; });
+      sh.querySelectorAll('[data-ho]').forEach(x => x.setAttribute('aria-pressed', opts[+x.dataset.ho].on)); preview(); });
+    sh.querySelectorAll('[data-how]').forEach(b => b.onclick = () => { how = b.dataset.how; sh.querySelectorAll('[data-how]').forEach(x=>x.setAttribute('aria-pressed', x===b)); drawBody(); });
+    preview(); drawBody();
+  });
+}
+
+/* -------- Add a friend: tag search, your friend link, and what you've sent -------- */
+function friendFinder(){
+  if(!LAPTOP) return '';
+  return `<label class="f" for="ffQ">Already on Split it</label>
+    <div class="cbox"><input class="in" id="ffQ" placeholder="@tag or email" autocapitalize="off" autocomplete="off"><button class="btn" id="ffFind">Find</button></div>
+    <div id="ffOut" aria-live="polite"></div>
+    <button class="btn block" id="ffMine" style="margin-top:8px">Show my friend link and QR code</button>`;
+}
+function bindFriendFinder(sh, after){
+  const q = sh.querySelector('#ffQ'); if(!q) return;
+  const out = sh.querySelector('#ffOut');
+  const find = async () => { const v = q.value.trim(); if(!v) return;
+    try{ const d = await api('/api/people/find', { q:v });
+      out.innerHTML = `<div class="card" style="margin-top:8px"><div class="row">${S.people[d.uid]?av(d.uid):''}<div class="body"><div class="t">${esc(d.name)}</div><div class="m">@${esc(d.tag)}</div></div>
+        ${d.friend?'<span class="mut">Friends</span>':d.asked?'<span class="mut">Asked</span>':`<button class="btn sm primary" id="ffAsk">Add friend</button>`}</div></div>`;
+      const a = out.querySelector('#ffAsk'); if(a) a.onclick = async () => { a.disabled = true;
+        try{ const r = await api('/api/friends/request', { to:d.uid }); if(r.friends){ closeSheet(); toast(`You’re friends with ${d.name}`); after ? after(d.uid) : go('friends',{type:'friend',id:d.uid}); } else { a.replaceWith(Object.assign(document.createElement('span'), {className:'mut', textContent:'Asked'})); toast(`Sent. ${d.name} gets a request to accept`); } loadInbox(true); }
+        catch(x){ toast(x.message); a.disabled = false; } };
+    }catch(x){ out.innerHTML = `<p class="note">${esc(x.message)}</p>`; } };
+  sh.querySelector('#ffFind').onclick = find; q.onkeydown = ev => { if(ev.key==='Enter'){ ev.preventDefault(); find(); } };
+  sh.querySelector('#ffMine').onclick = () => openFriendLink();
+}
+async function openFriendLink(fresh){
+  let d; try{ d = await api('/api/friends/link', fresh ? { fresh:true } : {}); }catch(x){ toast(x.message); return; }
+  const msg = `Add me on Split it: ${d.url}`;
+  openSheet(head('Your friend link') + `<p style="margin:0 0 4px">Your tag is <b>@${esc(d.tag)}</b>. Friends on Split it can find you with it.</p>
+    <p class="note" style="margin-top:0">Or let them scan this. Anyone on Split it who opens the link becomes your friend right away, so only share it with people you know.</p>
+    ${linkBox(d.url, msg, 'Shared it too widely? Make a new link and this one stops working.')}
+    <button class="btn block" id="flNew" style="margin-top:4px">Make a new link</button>`, sh => {
+    bindLinkBox(sh, d.url, msg);
+    sh.querySelector('#flNew').onclick = e => { if(!confirmTap(e.currentTarget, 'Tap again: the old link stops working')) return; openFriendLink(true); };
+  });
+}
+async function drawSentBox(box){
+  if(!box) return;
+  let inv = []; try{ inv = (await api('/api/invites')).list; }catch(e){}
+  await loadInbox(true);
+  const stat = { open:'Waiting for them', yes:'Taken over', no:'They said it’s not them', expired:'Expired', undone:'Undone' };
+  const rows = [
+    ...inv.filter(i=>!i.claim).map(i => `<div class="row"><div class="body"><div class="t">Invite link</div><div class="m">Made ${ago(i.at)}, not used yet</div></div><button class="btn sm" data-inv-x="${esc(i.id)}">Cancel</button></div>`),
+    ...S.inbox.freqOut.map(r => `<div class="row">${av(r.uid,'sm')}<div class="body"><div class="t ell">${esc(r.name)}</div><div class="m">Friend request, waiting</div></div><button class="btn sm" data-fr-x="${esc(r.id)}">Take back</button></div>`),
+    ...S.inbox.sent.map(c => `<div class="row"><div class="body"><div class="t ell">${esc(c.name)}’s history${c.toName?` → ${esc(c.toName)}`:c.viaLink?' (invite link)':''}</div><div class="m">${stat[c.status]||c.status}</div></div>
+      ${c.status==='open'?`<button class="btn sm" data-cl-x="${esc(c.id)}">Cancel</button>`:c.canUndo?`<button class="btn sm" data-cl-undo="${esc(c.id)}">Undo</button>`:''}</div>`),
+    ...S.inbox.got.filter(c=>c.canUndo).map(c => `<div class="row"><div class="body"><div class="t ell">History from ${esc(c.byName)}</div><div class="m">You took it over ${ago(c.answeredAt)}</div></div><button class="btn sm" data-cl-undo="${esc(c.id)}">Undo</button></div>`)];
+  box.innerHTML = rows.length ? `<label class="f">Sent and waiting</label><div class="card">${rows.join('')}</div>` : '';
+  const act = (sel, fn) => box.querySelectorAll(sel).forEach(b => b.onclick = async e => { const t = e.currentTarget;
+    if((sel==='[data-cl-undo]') && !confirmTap(t, 'Tap again to undo')) return; t.disabled = true;
+    try{ await fn(t); drawSentBox(box); }catch(x){ toast(x.message); t.disabled = false; } });
+  act('[data-inv-x]', t => api('/api/invites/cancel', { id:t.dataset.invX }).then(()=>toast('Link cancelled')));
+  act('[data-fr-x]', t => api('/api/friends/answer', { id:t.dataset.frX, yes:false }).then(()=>toast('Request taken back')));
+  act('[data-cl-x]', t => api('/api/claims/cancel', { id:t.dataset.clX }).then(()=>toast('Cancelled')));
+  act('[data-cl-undo]', t => api('/api/claims/undo', { id:t.dataset.clUndo }).then(()=>toast('Undone. Everything is back how it was')));
+}
+// someone opened your friend link: /#add=TOKEN
+async function useFriendLinkFromUrl(){
+  const m = location.hash.match(/(?:^#|&)add=([A-Za-z0-9_-]{10,})/); if(!LAPTOP || !m) return;
+  history.replaceState(history.state, '', location.pathname);
+  try{ const d = await api('/api/friends/link/use', { token:m[1] }); toast(`You’re friends with ${d.name} now`); setTimeout(() => go('friends',{type:'friend',id:d.uid}), 300); }
+  catch(x){ toast(x.message); }
+}
+
 /* ================= HOME ================= */
 /* What's new, shown once per version on the laptop app. Keep it to three lines people will care about. */
 const NEWS = { v:'2.2.0', lines:[
   ['Sign-in code', 'Add a second step from an authenticator app. It’s in your profile under Signing in.'],
-  ['Two people paid', 'Splitting a bill two of you paid? Tap “Two people paid” on a new expense.'],
+  ['Bring old expenses along', 'Invite someone you’ve been tracking by name. When they join, they take over that history. Friends find you by your @tag.'],
   ['Ask your AI assistant', 'Connect Claude or Muse to your own Split it. It’s in your profile under AI assistants.'] ] };
 const newsSeen = () => { try{ return localStorage.getItem('hs.news'); }catch(e){ return NEWS.v; } };
 function newsCard(){
@@ -1797,6 +2023,7 @@ function viewHome(){
     <p class="hline">${t.net>0?(t.net>EVEN_ENOUGH?'Go collect. That’s theirs to fix.':'Time to collect.'):t.net<0?'Settle up when you can.':streakLine()}</p></div>
     ${showArt?lulu(moodFor(t.net),'hart'):''}</section>`;
   h += newsCard();
+  h += inboxCards();
   if(canWrite){
     h += `<div class="quick"><label for="quickIn" class="sr">Quick add</label>
       <input id="quickIn" placeholder="lunch with Aman 24.50" autocomplete="off" enterkeyhint="go">
@@ -1841,7 +2068,7 @@ function billPeriod(e){
 function needsYou(gid){
   const out = [], groups = gid ? [S.groups[gid]] : myGroups();
   for(const g of groups){
-    if(g.createdBy===myUid) suggestedLinks(g.id).forEach(({p, a}) => out.push(`<div class="todo"><div class="line">${av(a)}<div class="body"><div class="t">${esc(nameOf(a))} is in ${esc(g.name)}</div>
+    if(!LAPTOP && g.createdBy===myUid) suggestedLinks(g.id).forEach(({p, a}) => out.push(`<div class="todo"><div class="line">${av(a)}<div class="body"><div class="t">${esc(nameOf(a))} is in ${esc(g.name)}</div>
       <div class="m">Are they “${esc(nameOf(p))}” who was added before they joined? Linking moves those expenses to their account.</div></div></div>
       <div class="acts"><button class="btn sm primary" data-link="${g.id}|${p}|${a}">Link them</button></div></div>`));
     alive(groupEntries(g.id)).filter(e=>e.status==='needs_amount').forEach(e => out.push(`<div class="todo"><div class="line"><span class="ic">${catIcon(e.category)}</span><div class="body">
@@ -2075,6 +2302,8 @@ function viewFriend(fid){
     ${contact?'<p class="hline">Not on the app. Everything with them is private to you.</p>':''}</div>${fg2?lulu(moodFor(-v),'hart',fg2):''}</section>`;
   if(canWrite) h += `<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap"><button class="btn primary" id="fAdd" data-fid="${esc(fid)}" style="flex:1">Add expense</button>
     ${v?`<button class="btn" id="fSettle" data-fid="${esc(fid)}" style="flex:1">Settle up</button>`:''}${v>0?`<button class="btn" id="fRemind" data-fid="${esc(fid)}" style="flex:1">Remind</button>`:''}</div>
+    ${contact && LAPTOP ? `<button class="btn block" style="margin-top:8px" data-handover='${esc(JSON.stringify({contact:fid}))}'>Invite ${esc(firstName(fid))} to Split it</button>
+      <p class="note">They make an account and can take over what you two have logged. If they’re already on Split it, send it to them there.</p>` : ''}
     ${v<0 && S.people[fid]?.etransfer?`<div class="ctxbar" style="margin-top:10px"><span class="mut">e‑Transfer</span><b class="ell">${esc(S.people[fid].etransfer)}</b><button class="link" data-et="${esc(S.people[fid].etransfer)}">Copy</button></div>`:''}`;
   h += waitingNote(e => e.to===fid || e.from===fid);
   if(parts.length > 1 || (parts.length===1 && parts[0].ctx.type==='group')) h += `<div class="sec-h"><h2>Where it comes from</h2></div><div class="card">${parts.map(p => `<button class="row" ${p.ctx.type==='group'?`data-group="${esc(p.ctx.id)}"`:''}><div class="body"><div class="t ell">${esc(p.label)}</div><div class="m">${owesLine(p.amount, esc(firstName(fid)))}</div></div><div class="r"><b class="${amtClass(p.amount)}">${money(Math.abs(p.amount))}</b></div>${p.ctx.type==='group'?'<span class="chev">›</span>':''}</button>`).join('')}</div>`;
@@ -2244,10 +2473,13 @@ function openMember(gid, id){
       <div class="note" style="margin:2px 0 0">In ${esc(g.name)}: ${b?`<b class="${amtClass(b)}">${b>0?'is owed ':'owes '}${money(Math.abs(b))}</b>`:'settled'}</div></div></div>
     ${guest && canWrite?`<label class="f" for="pn">Name</label><input class="in" id="pn" maxlength="24" value="${esc(m.name||'')}">
       <label class="f">Colour</label><div class="colors">${COLORS.map((c,i)=>`<button data-col="${i}" style="background:${c}" aria-label="Colour ${i+1}" aria-pressed="${i===color}"></button>`).join('')}</div>`:''}
-    ${guest && creator && (accounts.length>1 || outsiders.length) ? `<label class="f">They joined Split it?</label>
+    ${guest && LAPTOP && canWrite && m.active!==false ? `<label class="f">On Split it, or joining?</label>
+      <p class="note" style="margin-top:0">${esc(firstName(id))} can take over everything logged under this name. They say yes first, and the group is told.</p>
+      <button class="btn block" data-handover='${esc(JSON.stringify({guest:{gid, id}}))}'>Hand over ${esc(firstName(id))}’s history</button>`:''}
+    ${guest && !LAPTOP && creator && (accounts.length>1 || outsiders.length) ? `<label class="f">They joined Split it?</label>
       <p class="note" style="margin-top:0">Link their account and their history in this group moves to them. Only you can do this, because you created the group.</p>
       <div class="chips" style="margin-top:8px">${[...accounts.filter(x=>x.id!==myUid).map(x=>x.id), ...outsiders].map(u=>`<button class="chip" data-linkto="${esc(u)}">${av(u,'sm')}${esc(nameOf(u))}</button>`).join('')}</div>`:''}
-    ${guest && !creator ? `<p class="note">If ${esc(firstName(id))} joins the app, ${esc(nameOf(g.createdBy))} can link their account.</p>`:''}
+    ${guest && !LAPTOP && !creator ? `<p class="note">If ${esc(firstName(id))} joins the app, ${esc(nameOf(g.createdBy))} can link their account.</p>`:''}
     ${canWrite?`<label class="f">${isMe?'Leave':'In the group'}</label>
       ${m.active===false ? `<button class="btn block" id="back">Bring ${esc(firstName(id))} back</button>`
        : `<button class="btn block" id="out" ${b||paysBills.length?'disabled':''}>${isMe?'Leave this group':`Move ${esc(firstName(id))} out`}</button>
@@ -2323,16 +2555,19 @@ function openAddFriend(after){
   const known = new Set(friendIds());
   const people = Object.keys(S.people).filter(id => id!==myUid && !known.has(id));
   let color = (Object.keys(S.people).length + S.privFriends.length) % COLORS.length;
-  openSheet(head('Add a friend') + `${inviteBlock()}
-    <label class="f">On Split it</label>
+  const listAll = !LAPTOP || Object.keys(S.people).length <= BIG_HOUSE;
+  openSheet(head('Add a friend') + `${inviteBlock()}${friendFinder()}
+    ${!listAll ? '' : `<label class="f">${LAPTOP?'Everyone on this Split it':'On Split it'}</label>
     ${people.length?`<div class="chips">${people.map(id=>`<button class="chip" data-p="${esc(id)}">${av(id,'sm')}<span class="ell" style="max-width:9em">${esc(nameOf(id))}</span></button>`).join('')}</div>
       <p class="note">Expenses between you two are shared, so you both see them.</p>`
-      :`<p class="note" style="margin-top:0">${Object.keys(S.people).length>1?'Everyone on Split it is already a friend.':(LAPTOP?'Nobody else has signed in yet.':'Nobody else has opened Split it yet.')} ${LAPTOP?'Invite anyone new with a link above.':'To add someone, '+inviteHow()+'.'}</p>`}
+      :`<p class="note" style="margin-top:0">${Object.keys(S.people).length>1?'Everyone on Split it is already a friend.':(LAPTOP?'Nobody else has signed in yet.':'Nobody else has opened Split it yet.')} ${LAPTOP?'Invite anyone new with a link above.':'To add someone, '+inviteHow()+'.'}</p>`}`}
     <label class="f" for="cn">Not on the app</label>
     <input class="in" id="cn" placeholder="Their name" maxlength="24" autocomplete="off">
     <label class="f">Colour</label><div class="colors">${COLORS.map((c,i)=>`<button data-col="${i}" style="background:${c}" aria-label="Colour ${i+1}" aria-pressed="${i===color}"></button>`).join('')}</div>
     <p class="note">Private to you. Track what they owe you without them needing anything.</p>
+    <div id="sentBox"></div>
     <div class="foot"><button class="btn" data-close>Cancel</button><button class="btn primary" id="sv">Add contact</button></div>`, sh => {
+    bindFriendFinder(sh, after); drawSentBox(sh.querySelector('#sentBox'));
     sh.querySelectorAll('[data-col]').forEach(b => b.onclick = () => { color = Number(b.dataset.col); sh.querySelectorAll('[data-col]').forEach(x=>x.setAttribute('aria-pressed', x===b)); });
     sh.querySelectorAll('[data-p]').forEach(b => b.onclick = async () => {
       if(await write(()=>privDoc().collection('friends').doc(b.dataset.p).set({kind:'account', addedAt:Date.now()}))){ closeSheet(); after ? after(b.dataset.p) : go('friends',{type:'friend',id:b.dataset.p}); } });
@@ -3773,6 +4008,7 @@ async function boot(timer){
     privDoc().collection('favs').onSnapshot(s => { S.favs = s.docs.map(d=>({...d.data(), id:d.id})).sort((a,b)=>(b.at||0)-(a.at||0)); schedule(); }, () => {});
     privDoc().collection('entries').onSnapshot(s => { S.privEntries = s.docs.map(d => normEntry(d.data(), d.id, true)); gotE = true; S.got.priv = gotF && gotE; done(); }, () => { gotE = true; S.got.priv = gotF && gotE; done(); });
   } else S.got.priv = true;
+  if(myUid && LAPTOP){ loadInbox(true); useFriendLinkFromUrl(); }
 }
 start();
 })();

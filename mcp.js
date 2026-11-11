@@ -300,6 +300,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
   function privOwed(uid) {
     const per = {};
     for (const e of privEntries(uid)) {
+      if (e.carried) continue;   // handed over to someone who joined: counted once, in the shared "carried over" line
       if (e.kind === 'payment') { if (e.confirmed === false) continue;
         if (e.from === uid) per[e.to] = (per[e.to] || 0) + e.amount; else if (e.to === uid) per[e.from] = (per[e.from] || 0) - e.amount; continue; }
       for (const [id, c] of Object.entries(e.split || {})) {
