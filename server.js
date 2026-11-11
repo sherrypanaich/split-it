@@ -869,6 +869,34 @@ const PUBLIC_FILES = new Set(['/manifest.webmanifest', '/sw.js', '/icon.svg', '/
 const photoCount = new Map();   // uid|day -> uploads today
 
 const isOwner = uid => !!users.users[uid]?.owner;
+// Check every op first (access, money rules), then apply them all, with one save and one broadcast.
+// Used by /api/write and /api/batch, so a batch gets exactly the same checks as a single change.
+function writeOps(uid, ops) {
+  if (!Array.isArray(ops) || !ops.length || ops.length > 100) return { status: 400, body: { error: 'bad ops' } };
+  const alsoNew = new Set(ops.filter(x => x && x.op === 'set').map(x => x.path));
+  for (const o of ops) {
+    if (!o || typeof o !== 'object' || !['set', 'update', 'delete'].includes(o.op)) return { status: 400, body: { error: 'bad op' } };
+    if (!validPath(o.path) || segs(o.path).length % 2) return { status: 400, body: { error: 'bad path' } };
+    if (o.op !== 'delete' && (typeof o.data !== 'object' || !o.data || Array.isArray(o.data))) return { status: 400, body: { error: 'bad data' } };
+    if (o.op === 'update' && db.docs[o.path] == null) return { status: 404, body: { error: 'not found: ' + o.path } };
+    const after = o.op === 'set' ? o.data : o.op === 'update' ? { ...db.docs[o.path], ...o.data } : undefined;
+    if (!canWrite(uid, o.path, after)) return { status: 403, body: { error: 'not allowed' } };
+    const wrong = entryProblem(uid, o.path, db.docs[o.path], after, alsoNew);
+    if (wrong) return { status: 422, body: { error: wrong } };
+  }
+  const before = Object.fromEntries(ops.map(o => [o.path, db.docs[o.path]]));
+  for (const o of ops) {
+    if (o.op === 'set') db.docs[o.path] = o.data;
+    else if (o.op === 'update') db.docs[o.path] = { ...db.docs[o.path], ...o.data };
+    else if (o.op === 'delete') delete db.docs[o.path];
+  }
+  saveDb();
+  broadcast([...new Set(ops.map(o => o.path))], null, before);
+  tellPeople(uid, ops, before).catch(e => console.error(e));
+  if (ops.some(o => segs(o.path)[0] === 'recurring')) setImmediate(() => { try { postDueBills(); } catch (e) { console.error(e); } });   // a new bill due today shows up now
+  return { status: 200, body: { ok: true } };
+}
+
 async function handle(req, res) {
   // Laptop commands (node server.js set-password NAME ...) reach the running app here. Only from this computer,
   // never through a tunnel or proxy, and only with the secret from data/server.lock.
@@ -1097,30 +1125,11 @@ async function handle(req, res) {
       if (k.startsWith(prefix) && !k.slice(prefix.length).includes('/') && canRead(uid, k)) docs.push({ id: k.slice(prefix.length), data: v });
     return send(res, 200, { docs });
   }
-  if (p === '/api/write' && req.method === 'POST') {
+  // One change, or several that belong together (a move-out, "confirm all"): either all of them are saved or none.
+  if ((p === '/api/write' || p === '/api/batch') && req.method === 'POST') {
     const { ops } = await readBody(req);
-    if (!Array.isArray(ops) || !ops.length || ops.length > 100) return send(res, 400, { error: 'bad ops' });
-    for (const o of ops) {
-      if (!validPath(o.path) || segs(o.path).length % 2) return send(res, 400, { error: 'bad path' });
-      if (o.op !== 'delete' && (typeof o.data !== 'object' || !o.data || Array.isArray(o.data))) return send(res, 400, { error: 'bad data' });
-      if (o.op === 'update' && db.docs[o.path] == null) return send(res, 404, { error: 'not found: ' + o.path });
-      const after = o.op === 'set' ? o.data : o.op === 'update' ? { ...db.docs[o.path], ...o.data } : undefined;
-      if (!canWrite(uid, o.path, after)) return send(res, 403, { error: 'not allowed' });
-      const wrong = entryProblem(uid, o.path, db.docs[o.path], after, new Set(ops.filter(x => x.op === 'set').map(x => x.path)));
-      if (wrong) return send(res, 422, { error: wrong });
-    }
-    const before = Object.fromEntries(ops.map(o => [o.path, db.docs[o.path]]));
-    for (const o of ops) {
-      if (o.op === 'set') db.docs[o.path] = o.data;
-      else if (o.op === 'update') db.docs[o.path] = { ...db.docs[o.path], ...o.data };
-      else if (o.op === 'delete') delete db.docs[o.path];
-    }
-    saveDb();
-    broadcast(ops.map(o => o.path), null, before);
-    send(res, 200, { ok: true });
-    tellPeople(uid, ops, before).catch(e => console.error(e));
-    if (ops.some(o => segs(o.path)[0] === 'recurring')) setImmediate(() => { try { postDueBills(); } catch (e) { console.error(e); } });   // a new bill due today shows up now
-    return;
+    const r = writeOps(uid, ops);
+    return send(res, r.status, r.body);
   }
   if (p === '/api/events') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });

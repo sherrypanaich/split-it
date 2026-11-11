@@ -38,6 +38,7 @@ function browser(ip) {
     signIn: (name, password) => me.post('/api/login', { name, password }),
     write: (...ops) => me.post('/api/write', { ops }),
     set: (p, data) => me.write({ op: 'set', path: p, data }), update: (p, data) => me.write({ op: 'update', path: p, data }),
+    cookie: () => cookie,
     doc: p => me.get('/api/doc?path=' + encodeURIComponent(p)), col: p => me.get('/api/col?path=' + encodeURIComponent(p)),
   };
   return me;
@@ -256,6 +257,70 @@ test('one bad change in a batch stops the whole batch', async () => {
     { op: 'set', path: 'expenses/' + bad, data: expense(ana, 1000, { [ana.uid]: 500, [ben.uid]: 400 }) });
   assert.strictEqual(r.status, 422);
   assert.strictEqual((await ana.doc('expenses/' + good)).data.data, null, 'nothing from that batch was saved');
+});
+
+// ---------- batches: several changes that belong together ----------
+// Open someone's live-update stream and collect what it sends for a moment.
+async function listen(b, ms, during) {
+  const ctl = new AbortController(), events = [];
+  const r = await fetch(`http://127.0.0.1:${PORT}/api/events`, { headers: { Cookie: b.cookie() }, signal: ctl.signal });
+  const reader = r.body.getReader(), dec = new TextDecoder(); let buf = '';
+  const pump = (async () => { try { for (;;) { const { value, done } = await reader.read(); if (done) break; buf += dec.decode(value);
+    let i; while ((i = buf.indexOf('\n\n')) >= 0) { const chunk = buf.slice(0, i); buf = buf.slice(i + 2); const ev = /event: (\w+)/.exec(chunk)?.[1]; const data = /data: (.*)/.exec(chunk)?.[1]; if (ev) events.push({ ev, data: data && JSON.parse(data) }); } } } catch {} })();
+  await new Promise(res => setTimeout(res, 150));
+  await during();
+  await new Promise(res => setTimeout(res, ms));
+  ctl.abort(); await pump;
+  return events.filter(e => e.ev === 'change');
+}
+
+test('a batch saves every change together, with one live update', async () => {
+  const p1 = id('p'), p2 = id('p'), bill = id('r');
+  assert.strictEqual((await ben.write({ op: 'set', path: 'expenses/' + p1, data: payment(ben, ben.uid, ana.uid, 1500, { confirmed: false }) },
+    { op: 'set', path: 'expenses/' + p2, data: payment(ben, ben.uid, ana.uid, 700, { confirmed: false }) })).status, 200);
+  assert.strictEqual((await ana.set('recurring/' + bill, { title: 'Rent', groupId: GID, paidBy: ben.uid, amount: 100000, splitMode: 'equal', splitInput: { ids: [ana.uid, ben.uid] }, paused: true })).status, 200);
+  let r;
+  const changes = await listen(ben, 300, async () => {
+    r = await ana.post('/api/batch', { label: 'Confirm all', ops: [
+      { op: 'update', path: 'expenses/' + p1, data: { confirmed: true } },
+      { op: 'update', path: 'expenses/' + p2, data: { confirmed: true } },
+      { op: 'update', path: 'recurring/' + bill, data: { paidBy: ana.uid } }] });
+  });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.data));
+  assert.strictEqual((await ana.doc('expenses/' + p1)).data.data.confirmed, true);
+  assert.strictEqual((await ana.doc('expenses/' + p2)).data.data.confirmed, true);
+  assert.strictEqual((await ana.doc('recurring/' + bill)).data.data.paidBy, ana.uid);
+  assert.strictEqual(changes.length, 1, 'one live update for the whole batch');
+  assert.deepStrictEqual(changes[0].data.paths.sort(), ['expenses/' + p1, 'expenses/' + p2, 'recurring/' + bill].sort());
+});
+
+test('a batch with one bad change saves none of it, and says why', async () => {
+  const p1 = id('p'), p2 = id('p'), bill = id('r');
+  assert.strictEqual((await ben.write({ op: 'set', path: 'expenses/' + p1, data: payment(ben, ben.uid, ana.uid, 1500, { confirmed: false }) },
+    { op: 'set', path: 'expenses/' + p2, data: payment(ben, ben.uid, ana.uid, 700, { confirmed: false }) })).status, 200);
+  assert.strictEqual((await ana.set('recurring/' + bill, { title: 'Hydro', groupId: GID, paidBy: ana.uid, amount: 9000, splitMode: 'equal', splitInput: { ids: [ana.uid, ben.uid] }, paused: true })).status, 200);
+  // Ben tries to mark his own payments to Ana as received, along with a harmless bill change: all of it is refused
+  let r = await ben.post('/api/batch', { ops: [
+    { op: 'update', path: 'recurring/' + bill, data: { paidBy: ben.uid } },
+    { op: 'update', path: 'expenses/' + p1, data: { confirmed: true } },
+    { op: 'update', path: 'expenses/' + p2, data: { confirmed: true } }] });
+  assert.strictEqual(r.status, 422);
+  assert.match(r.data.error, /can confirm/);
+  assert.strictEqual((await ana.doc('recurring/' + bill)).data.data.paidBy, ana.uid, 'the good change in the batch was not saved either');
+  assert.strictEqual((await ana.doc('expenses/' + p1)).data.data.confirmed, false);
+  // a change the person may not make at all stops the batch too
+  const e = id();
+  r = await cat.post('/api/batch', { ops: [
+    { op: 'set', path: 'expenses/' + e, data: { ...expense(cat, 500, { [cat.uid]: 500 }), groupId: null, people: [cat.uid] } },
+    { op: 'update', path: 'recurring/' + bill, data: { paidBy: cat.uid } }] });
+  assert.strictEqual(r.status, 403);
+  assert.strictEqual((await cat.doc('expenses/' + e)).data.data, null);
+  // a missing document, or junk, stops it as well
+  r = await ana.post('/api/batch', { ops: [{ op: 'update', path: 'recurring/' + bill, data: { paidBy: ben.uid } }, { op: 'update', path: 'expenses/nope_' + e, data: { confirmed: true } }] });
+  assert.strictEqual(r.status, 404);
+  assert.strictEqual((await ana.post('/api/batch', { ops: [{ op: 'rename', path: 'recurring/' + bill }] })).status, 400);
+  assert.strictEqual((await ana.post('/api/batch', { ops: [] })).status, 400);
+  assert.strictEqual((await ana.doc('recurring/' + bill)).data.data.paidBy, ana.uid);
 });
 
 // ---------- sign-in code ----------
