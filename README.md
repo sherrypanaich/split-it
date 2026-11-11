@@ -317,6 +317,8 @@ and give Muse the key it prints (it's a "Bearer" token). If there's only a box f
 
 If the sign-in link points at the wrong address, set `PUBLIC_URL=https://YOUR-ADDRESS` in `split-it.env` and restart the app.
 
+**Find it in the MCP registry:** the app is listed in the official [MCP registry](https://registry.modelcontextprotocol.io) as `io.github.sherrypanaich/split-it` (see `server.json`). Assistants that read the registry ask for your address and connect to `https://YOUR-ADDRESS/mcp`. To update the listing after a release, bump `version` in `server.json` and run **List in the MCP registry** from the Actions tab.
+
 ## Character art
 
 The guide characters in `public/art/` and `docs/images/` are not covered by the MIT licence and may not be reused. If you own something shown here and want it removed, [open an issue](https://github.com/sherrypanaich/split-it/issues/new) and we'll take it down.
