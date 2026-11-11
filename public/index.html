@@ -469,7 +469,7 @@ button.tile:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--pop)}
 /* offline pill */
 .netpill{position:fixed;left:50%;transform:translateX(-50%);top:calc(8px + env(safe-area-inset-top,0px));z-index:40;background:#14112A;color:#fff;border:2px solid #FFD23F;border-radius:999px;padding:5px 12px;font-size:.8rem;font-weight:700;display:flex;gap:8px;align-items:center;box-shadow:3px 3px 0 rgba(0,0,0,.25)}
 .netpill i{width:8px;height:8px;border-radius:50%;background:#FF8A9A;flex:none}.netpill.sync i{background:#FFD23F;animation:blink 1s infinite}
-.netpill{max-width:calc(100vw - 32px)}.netpill>span{display:flex;flex-direction:column;line-height:1.2}.netpill small{font-weight:600;opacity:.8;font-size:.72rem}
+.netpill{max-width:calc(100vw - 32px)}.netpill>span{display:flex;flex-direction:column;line-height:1.2}.netpill b{white-space:nowrap}.netpill small{font-weight:600;opacity:.8;font-size:.72rem}
 .netpill .nsbtn{font:inherit;font-weight:800;color:#14112A;background:#FF8A9A;border:0;border-radius:999px;padding:3px 10px;cursor:pointer}
 .netpill.warn{padding:4px}
 /* month headers in lists carry the month's total */
@@ -3715,8 +3715,9 @@ function netPill(){
   if(!el){ el = document.createElement('div'); el.id = 'netpill'; el.setAttribute('role','status'); document.body.appendChild(el); }
   const last = off?.lastSynced?.();
   el.className = 'netpill' + (!offline && pend ? ' sync' : '') + (!offline && !pend && ns ? ' warn' : '');
-  const main = offline ? `Offline${pend ? ` · Waiting to sync (${pend})` : ''}` : pend ? `Waiting to sync (${pend})` : '';
-  el.innerHTML = (main ? `<i></i><span>${main}${last ? `<small>Last synced ${esc(syncedLabel(last))}</small>` : offline ? '<small>Showing what you had</small>' : ''}</span>` : '')
+  const main = pend ? `Waiting to sync (${pend})` : offline ? 'Offline' : '';
+  const sub = [pend && offline ? 'Offline' : '', last ? `last synced ${esc(syncedLabel(last))}` : offline ? 'showing what you had' : ''].filter(Boolean).join(' · ');
+  el.innerHTML = (main ? `<i></i><span><b>${main}</b>${sub ? `<small>${sub.charAt(0).toUpperCase() + sub.slice(1)}</small>` : ''}</span>` : '')
     + (ns ? `<button type="button" class="nsbtn" data-notsaved>${ns} not saved</button>` : '');
   const nb = el.querySelector('[data-notsaved]'); if(nb) nb.onclick = openNotSaved;
 }
@@ -3756,6 +3757,7 @@ const notSavedText = it => `${describeChange(it)} couldn’t be saved: ${whyNotS
 // Redo: an expense opens its form again, filled in with what you entered. Anything else is simply sent again.
 function redoChange(it){
   window.HouseSplitOffline?.dismiss(it.id); netPill(); if(S.tab==='home' && !S.page) schedule();
+  document.querySelectorAll('.toast').forEach(t=>t.remove());
   const ops = it.ops || [], o = ops[0];
   if(ops.length===1 && o && o.op!=='delete' && entryOp(o)){
     const s = o.path.split('/'), cur = entryNow(s[s.length-1]), e = o.op==='set' ? {...o.data} : {...(cur||{}), ...o.data};
@@ -3780,8 +3782,8 @@ function notSavedCard(){
 }
 function openNotSaved(){
   const draw = () => { const list = notSavedList().slice().reverse();
-    return list.length ? `<div class="card">${list.map(it => `<div class="row"><div class="body"><div class="t">${esc(describeChange(it))}</div>
-      <div class="m">${esc(whyNotSaved(it))}</div><small class="mut">${esc(syncedLabel(it.at))}</small></div>
+    return list.length ? `<div class="card">${list.map(it => `<div class="row" style="flex-wrap:wrap"><div class="body" style="min-width:12em"><div class="t" style="white-space:normal">${esc(describeChange(it))}</div>
+      <div class="m" style="white-space:normal">${esc(whyNotSaved(it))}</div><small class="mut">${esc(syncedLabel(it.at))}</small></div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end"><button class="btn sm primary" data-redo="${esc(it.id)}">Redo</button><button class="btn sm" data-dismiss="${esc(it.id)}">Dismiss</button></div></div>`).join('')}</div>`
       : `<p class="note">Nothing waiting. Everything you changed got saved.</p>`; };
   openSheet(head('Not saved') + `<p class="note" style="margin-top:0">These changes were made while the laptop couldn’t be reached, and it wouldn’t take them when it could. Nothing else was held up.</p><div id="nsList">${draw()}</div>
