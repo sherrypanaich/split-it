@@ -212,7 +212,7 @@ function removeUser(id) {
   const u = userOf(id); if (!u) return null;
   mcp.revoke(id);
   // bills they're in stop until their groups pick who takes over
-  for (const k of Object.keys(db.docs)) { const s = segs(k); if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && s[3] === id && db.docs[k] && db.docs[k].active !== false) pauseBillsFor(s[1], id, null, nameFor(id)); }
+  for (const k of Object.keys(db.docs)) { const s = segs(k); if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && s[3] === id && db.docs[k] && db.docs[k].active !== false) leftGroup(s[1], id, null, nameFor(id)); }
   let n = 0;
   for (const [t, sess] of Object.entries(users.sessions)) if (sess.uid === id) { delete users.sessions[t]; n++; }
   delete users.users[id];
@@ -1284,12 +1284,28 @@ function pauseBillsFor(gid, id, by, name) {
     body: `${list} ${titles.length === 1 ? 'is' : 'are'} paused so nobody is charged by mistake. Open Split it to pick who takes over.`, tag: 'takeover-' + gid }).catch(e => console.error(e));
   return hit;
 }
+// Someone left a group: take them out of its chore rotations, so it never becomes their turn again.
+// Whoever's turn it is now keeps it (or, if it was the leaver's, the next person in the order takes it).
+function dropFromChores(gid, id) {
+  const hit = [];
+  for (const [k, c] of Object.entries(db.docs)) {
+    const s = segs(k);
+    if (s[0] !== 'chores' || s.length !== 2 || !c || c.groupId !== gid || !Array.isArray(c.order) || !c.order.includes(id)) continue;
+    const n = c.order.length, at = (Number(c.turn) || 0) % n, j = c.order.indexOf(id), order = c.order.filter(x => x !== id);
+    const turn = order.length ? (j < at ? at - 1 : at) % order.length : 0;
+    db.docs[k] = { ...c, order, turn };
+    hit.push(k);
+  }
+  if (hit.length) { saveDb(); broadcast(hit); }
+  return hit;
+}
+function leftGroup(gid, id, by, name) { dropFromChores(gid, id); return pauseBillsFor(gid, id, by, name); }
 // After a write: anyone who just left a group (made inactive, or taken out) gets their bills paused.
 function leaversIn(uid, ops, before) {
   for (const o of ops) {
     const s = segs(o.path), was = before[o.path], now = db.docs[o.path];
     if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && was && was.active !== false && (now == null || now.active === false))
-      pauseBillsFor(s[1], s[3], uid, was.name);
+      leftGroup(s[1], s[3], uid, was.name);
   }
 }
 
@@ -1439,6 +1455,8 @@ function myData(uid) {
 function forgetPerson(uid) {
   let removed = 0, kept = 0; const changed = [], before = {};
   const put = (k, d) => { if (!Object.hasOwn(before, k)) before[k] = db.docs[k]; if (d == null) delete db.docs[k]; else db.docs[k] = d; changed.push(k); };
+  // first, while they still count as in their groups: pause the bills they're in and take them out of chores
+  for (const [k, d] of Object.entries(db.docs)) { const s = segs(k); if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && s[3] === uid && d && d.active !== false) leftGroup(s[1], uid, null, nameFor(uid)); }
   for (const [k, d] of Object.entries(db.docs)) {
     const s = segs(k);
     if ((s[0] === 'data' && s[2] === uid) || (s[0] === 'people' && s[1] === uid)) { put(k, null); removed++; continue; }

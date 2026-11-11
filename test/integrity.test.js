@@ -386,6 +386,21 @@ test('delete my data needs the password, removes the private data, and keeps sha
   assert.ok(!JSON.stringify(db).includes('Gussie'));
 });
 
+test('delete my data pauses the bills that person was in and takes them out of chores', async () => {
+  assert.match(cli(['add-user', 'Ivy'], 'ivy-password\n'), /Added/);
+  const ivy = await as('Ivy');
+  const g = await newGroup(ana, [ivy]);
+  await ana.set('recurring/r_ivy', { groupId: g, title: 'Rent', amount: 90000, paidBy: ana.uid, splitMode: 'equal', splitInput: { ids: [ana.uid, ivy.uid] },
+    day: 1, every: 'month', startMonth: '2099-01', lastPosted: null, paused: false, createdAt: Date.now(), addedBy: ana.uid });
+  await ana.set('chores/c_ivy', { groupId: g, title: 'Trash', every: 7, order: [ana.uid, ivy.uid], turn: 1, due: '2099-01-01', createdAt: Date.now(), addedBy: ana.uid });
+  assert.strictEqual((await ivy.post('/api/me/delete', { password: 'ivy-password' })).status, 200);
+  const bill = await ana.data('recurring/r_ivy');
+  assert.strictEqual(bill.paused, true, 'the bill doesn’t keep charging someone who is gone');
+  assert.strictEqual(bill.takeover.who, ivy.uid);
+  const c = await ana.data('chores/c_ivy');
+  assert.deepStrictEqual([c.order, c.turn], [[ana.uid], 0]);
+});
+
 test('the only owner can’t delete themselves away, and the owner can still remove people', async () => {
   const r = await ana.post('/api/me/delete', { password: 'ana-password' });
   assert.strictEqual(r.status, 400); assert.match(r.data.error, /only owner/);
