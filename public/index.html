@@ -1625,7 +1625,7 @@ async function drawAccount(box){
     const kc = form.querySelector('#acKeyCopy'); if(kc) kc.onclick = async () => { try{ await navigator.clipboard.writeText(st.secret); toast('Key copied'); }catch(e){ toast('Couldn’t copy. Type it in'); } };
   };
   box.querySelector('#acOut').onclick = async e => { if(!confirmTap(e.currentTarget, 'Tap again to sign out everywhere')) return;
-    try{ await api('/api/account/signout-all', {}); await window.HouseSplitOffline?.forget(); location.href = '/login'; }catch(x){ toast(x.message); } };
+    try{ await pushOff().catch(()=>{}); await api('/api/account/signout-all', {}); await window.HouseSplitOffline?.forget(); location.href = '/login'; }catch(x){ toast(x.message); } };
 }
 /* ================= your AI assistants: connect Claude, Muse or ChatGPT to your own account ================= */
 const copyIt = async (text, ok) => { try{ await navigator.clipboard.writeText(text); toast(ok); }catch(e){ toast('Couldn’t copy. Select it and copy it'); } };
@@ -1703,12 +1703,22 @@ async function pushOn(){
   let sub = await swReg.pushManager.getSubscription();
   if(!sub) sub = await swReg.pushManager.subscribe({userVisibleOnly:true, applicationServerKey:b64ToBytes(key)});
   const r = await fetch('/api/push/subscribe', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(sub.toJSON())});
+  if(r.ok) lsSet('hs-push-by', myUid);
   loadPushPeople(); return r.ok;
+}
+// A phone's notifications belong to whoever turned them on. If someone else signs in here without the first
+// person signing out, the old subscription is ended, so their notifications stop showing on this phone.
+async function pushForOthers(){
+  const by = lsGet('hs-push-by'); if(!by || by===myUid || !('serviceWorker' in navigator)) return;
+  const reg = await navigator.serviceWorker.getRegistration().catch(()=>null);
+  const sub = reg && await reg.pushManager?.getSubscription().catch(()=>null);
+  if(sub) await sub.unsubscribe().catch(()=>{});
+  lsSet('hs-push-by', null);
 }
 async function pushOff(){
   const sub = await swReg?.pushManager.getSubscription(); if(!sub) return;
   await fetch('/api/push/unsubscribe', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({endpoint:sub.endpoint})});
-  await sub.unsubscribe(); loadPushPeople();
+  await sub.unsubscribe(); lsSet('hs-push-by', null); loadPushPeople();
 }
 async function drawPushBox(box){
   if(!box) return;
@@ -2062,7 +2072,7 @@ async function openFriendLink(fresh){
   });
 }
 async function drawSentBox(box){
-  if(!box) return;
+  if(!box || !LAPTOP) return;   // invite links, requests and hand-overs live on the laptop
   let inv = []; try{ inv = (await api('/api/invites')).list; }catch(e){}
   await loadInbox(true);
   const stat = { open:'Waiting for them', yes:'Taken over', no:'They said it’s not them', expired:'Expired', undone:'Undone' };
@@ -3174,7 +3184,7 @@ function openGroupActivity(gid){
       <div class="r"><b>${money(Math.abs(x.e.amount||0))}</b>${x.c.what==='removed'?'<small class="neg">removed</small>':''}</div></button>`; };
   openSheet(head(`${esc(g.name)} activity`) + (ev.length
     ? days.map(([d, xs]) => `<div class="act-day">${esc(d===today()?'Today':dayLabel(d))}</div><div class="card">${xs.map(row).join('')}</div>`).join('')
-      + `<p class="note">Who added, changed or removed what, newest first. The laptop keeps the record, so it can’t be skipped.</p>`
+      + `<p class="note">Who added, changed or removed what, newest first.${LAPTOP?' The laptop keeps the record, so it can’t be skipped.':''}</p>`
     : `<div class="empty">Nothing yet. Adds, changes and payments show up here.</div>`), sh => {
     sh.querySelectorAll('[data-act]').forEach(b => b.onclick = () => openDetail(b.dataset.act));
   });
@@ -4301,7 +4311,11 @@ window.addEventListener('hs-dropped', ev => {
 async function signOutHere(el){
   const off = window.HouseSplitOffline, n = off ? off.pending() : 0;
   if(n && !confirmTap(el, `Tap again. ${n} change${n===1?'':'s'} not synced yet will be lost`)) return;
-  if(off) await off.signOut('/api/logout'); else location.href = '/api/logout';
+  if(!off){ location.href = '/api/logout'; return; }
+  // this phone's notifications are yours: stop them first, so the next person here doesn't get them
+  await pushOff().catch(()=>{});
+  try{ await off.signOut('/api/logout'); }
+  catch(e){ toast('You’re offline. Sign out once the laptop can be reached, or you’d still be signed in on this phone.'); }
 }
 document.getElementById('addBtn').onclick = () => {
   if(S.page?.type==='group') openExpense({ctx:{type:'group', id:S.page.id}});
@@ -4360,7 +4374,7 @@ async function boot(timer){
   user = u; sample = smp; downloads = dl;
   if(sample){ try{ canImages = !!(await sample.limits())?.images; }catch(e){ canImages = false; } }
   if(user){ myUid = await user.id(); isOwner = await user.isOwner(); const w = await user.can('data.write'); if(w===false) canWrite = false;
-    if(myUid) user.profiles([myUid]).then(ps => { S.prof = bare({...S.prof, ...ps}); schedule(); });
+    if(myUid) user.profiles([myUid]).then(ps => { S.prof = bare({...S.prof, ...ps}); schedule(); }, () => {});   // offline with no saved copy of it: the full list comes later
     if(isOwner && LAPTOP){ loadOwnerAlerts(); setInterval(loadOwnerAlerts, 10*60e3); } }
   else canWrite = false;
   const done = () => { if(ready()) clearTimeout(timer); tick(); };
@@ -4391,7 +4405,7 @@ async function boot(timer){
     privDoc().collection('favs').onSnapshot(s => { S.favs = s.docs.map(d=>({...d.data(), id:d.id})).sort((a,b)=>(b.at||0)-(a.at||0)); schedule(); }, () => {});
     privDoc().collection('entries').onSnapshot(s => { S.privEntries = s.docs.map(d => normEntry(d.data(), d.id, true)); gotE = true; S.got.priv = gotF && gotE; done(); }, () => { gotE = true; S.got.priv = gotF && gotE; done(); });
   } else S.got.priv = true;
-  if(myUid && LAPTOP){ loadInbox(true); useFriendLinkFromUrl(); }
+  if(myUid && LAPTOP){ loadInbox(true); useFriendLinkFromUrl(); pushForOthers(); }
 }
 start();
 })();
