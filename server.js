@@ -42,6 +42,13 @@ const PUSH_FILE = path.join(DATA_DIR, 'push.json');
 const PUSH_KEYS_FILE = path.join(DATA_DIR, 'push-keys.json');
 const PUSH_CONTACT = process.env.PUSH_CONTACT || 'mailto:split-it@example.com';
 const REMIND_HOUR = +process.env.REMIND_HOUR || 9;   // bill reminders go out after this hour, laptop time
+// The money everything is kept in: balances, bills, notifications, the calendar and the assistant. One per install.
+// A trip group can still pay in another currency; those amounts are turned into this one when they're added.
+const HOME = (() => {
+  const c = String(process.env.HOME_CURRENCY || 'CAD').trim().toUpperCase();
+  try { if (/^[A-Z]{3}$/.test(c)) { new Intl.NumberFormat('en-CA', { style: 'currency', currency: c }); return c; } } catch {}
+  console.log(`HOME_CURRENCY=${c} isn’t a currency code like CAD, USD or EUR. Using CAD.`); return 'CAD';
+})();
 // A second place for backups that isn't this laptop's data folder: a USB drive, or a folder a sync app
 // (Dropbox, Syncthing, Nextcloud...) sends elsewhere. One full zip a day goes there, 14 kept.
 const BACKUP_COPY_DIR = (process.env.BACKUP_COPY_DIR || '').trim() ? path.resolve(process.env.BACKUP_COPY_DIR.trim()) : null;
@@ -117,6 +124,8 @@ const findUser = who => {   // by name, or by a checked email
 function removeUser(id) {
   const u = users.users[id]; if (!u) return null;
   mcp.revoke(id);
+  // bills they're in stop until their groups pick who takes over
+  for (const k of Object.keys(db.docs)) { const s = segs(k); if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && s[3] === id && db.docs[k] && db.docs[k].active !== false) pauseBillsFor(s[1], id, null, nameFor(id)); }
   let n = 0;
   for (const [t, sess] of Object.entries(users.sessions)) if (sess.uid === id) { delete users.sessions[t]; n++; }
   delete users.users[id];
@@ -490,10 +499,48 @@ async function latestRelease() {
   return release.data;
 }
 
+// ---------- exchange rates for trips ----------
+// One shared copy for the whole house in data/rates.json, fetched at most once a day from frankfurter.app
+// (European Central Bank rates, free, no key). If that service is down, the last good rates are used and the
+// page says which day they're from. Every expense still keeps the rate it was converted at.
+const RATES_FILE = path.join(DATA_DIR, 'rates.json');
+const RATES_URL = (process.env.RATES_URL || 'https://api.frankfurter.app/latest').trim();
+let fx = (() => { try { const r = JSON.parse(fs.readFileSync(RATES_FILE, 'utf8')); return r && typeof r.rates === 'object' ? r : {}; } catch { return {}; } })();
+let fxBusy = null;
+const fxFresh = () => !!fx.fetchedAt && ymd(new Date(fx.fetchedAt)) === ymd(new Date());
+function refreshRates(force) {
+  if (RATES_URL === 'off' || (!force && fxFresh())) return Promise.resolve(fx);
+  if (!force && fx.triedAt && Date.now() - fx.triedAt < 3600e3) return Promise.resolve(fx);   // it failed lately: try again in an hour
+  if (fxBusy) return fxBusy;
+  fxBusy = (async () => {
+    fx.triedAt = Date.now();
+    try {
+      const r = await fetch(RATES_URL, { signal: AbortSignal.timeout(6000), headers: { 'User-Agent': 'split-it' } });
+      if (!r.ok) throw new Error('the rate service answered ' + r.status);
+      const d = await r.json(), base = String(d?.base || 'EUR').toUpperCase(), rates = { [base]: 1 };
+      for (const [k, v] of Object.entries(d?.rates || {})) if (/^[A-Z]{3}$/.test(k) && Number(v) > 0) rates[k] = Number(v);
+      if (Object.keys(rates).length < 3 || !/^\d{4}-\d\d-\d\d$/.test(d?.date || '')) throw new Error('the rate service sent something unexpected');
+      fx = { base, date: d.date, rates, fetchedAt: Date.now(), triedAt: Date.now(), error: null };
+    } catch (e) { fx.error = e.message || 'couldn’t reach the rate service'; }
+    try { save(RATES_FILE, fx); } catch (e) { console.error(e); }
+    return fx;
+  })().finally(() => { fxBusy = null; });
+  return fxBusy;
+}
+// How much one `cur` is worth in the home currency, from the shared copy, or null when there is no rate for it.
+function rateTo(cur) {
+  cur = String(cur || '').toUpperCase(); if (cur === HOME) return 1;
+  const r = fx.rates || {}; if (!(r[cur] > 0) || !(r[HOME] > 0)) return null;
+  return +(r[HOME] / r[cur]).toPrecision(6);
+}
+// What the page and the assistant see: the rates against the home currency, the day they're from, and whether they're old.
+const ratesView = () => ({ home: HOME, date: fx.date || null, fetchedAt: fx.fetchedAt || null, stale: !fxFresh(), error: fxFresh() ? null : fx.error || null,
+  rates: Object.fromEntries(Object.keys(fx.rates || {}).filter(c => c !== HOME).map(c => [c, rateTo(c)]).filter(([, v]) => v)) });
+
 // ---------- phone notifications ----------
 let pushKeys = push.loadKeys(PUSH_KEYS_FILE);
 const nudges = new Map();
-const money = new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD' });
+const money = new Intl.NumberFormat('en-CA', { style: 'currency', currency: HOME, currencyDisplay: 'narrowSymbol' });
 const cad = cents => money.format((cents || 0) / 100);
 const nameFor = id => db.docs['people/' + id]?.nickname || users.users[id]?.name || 'Someone';
 async function notify(uids, message) {
@@ -662,6 +709,38 @@ function postDueBills() {
   }
   if (changed.length) { saveDb(); broadcast(changed); }
 }
+// ---------- someone leaves a group: their bills wait until the group says who takes over ----------
+// The move-out helper takes people out of bills before they leave. When that didn't happen (an older phone,
+// a member removed another way, an account taken off the laptop), each bill they pay or share is paused here,
+// so it can't charge them after they've gone, and the rest of the group is asked who takes over.
+function pauseBillsFor(gid, id, by, name) {
+  const hit = [];
+  for (const [k, r] of Object.entries(db.docs)) {
+    const s = segs(k);
+    if (s[0] !== 'recurring' || s.length !== 2 || !r || r.groupId !== gid || r.takeover) continue;
+    const [mode, input] = billMode(r);
+    if (r.paidBy !== id && !Object.prototype.hasOwnProperty.call(computeSplit(100000, mode, input, 'x'), id)) continue;
+    db.docs[k] = { ...r, paused: true, takeover: { who: id, at: Date.now(), by: by || null, wasPaused: !!r.paused } };
+    hit.push(k);
+  }
+  if (!hit.length) return [];
+  saveDb(); flushDb(); broadcast(hit);
+  const g = db.docs['groups/' + gid], titles = hit.map(k => db.docs[k].title || 'A bill');
+  const who = name || (users.users[id] ? nameFor(id) : db.docs[`groups/${gid}/members/${id}`]?.name) || 'Someone';
+  const list = titles.length > 1 ? titles.slice(0, -1).join(', ') + ' and ' + titles[titles.length - 1] : titles[0];
+  notify(activeMembers(gid).filter(u => u !== id), { title: `${who} left ${g?.name || 'your group'}`,
+    body: `${list} ${titles.length === 1 ? 'is' : 'are'} paused so nobody is charged by mistake. Open Split it to pick who takes over.`, tag: 'takeover-' + gid }).catch(e => console.error(e));
+  return hit;
+}
+// After a write: anyone who just left a group (made inactive, or taken out) gets their bills paused.
+function leaversIn(uid, ops, before) {
+  for (const o of ops) {
+    const s = segs(o.path), was = before[o.path], now = db.docs[o.path];
+    if (s[0] === 'groups' && s.length === 4 && s[2] === 'members' && was && was.active !== false && (now == null || now.active === false))
+      pauseBillsFor(s[1], s[3], uid, was.name);
+  }
+}
+
 // Is this bill due on that day?
 function billDueOn(r, d) {
   const s = ymd(d);
@@ -854,7 +933,10 @@ function staticFile(name) {
   if (!fp.startsWith(PUBLIC + path.sep) || !fs.existsSync(fp) || !fs.statSync(fp).isFile()) return null;
   const mtime = fs.statSync(fp).mtimeMs, hit = fileCache.get(name);
   if (hit && hit.mtime === mtime) return hit;
-  const data = fs.readFileSync(fp), etag = '"' + crypto.createHash('sha1').update(data).digest('base64url').slice(0, 20) + '"';
+  let data = fs.readFileSync(fp);
+  // the page learns this install's home currency from a tag in its head, so it can format money before anything loads
+  if (name === 'index.html' && HOME !== 'CAD') data = Buffer.from(data.toString('utf8').replace('<meta name="home-currency" content="CAD">', `<meta name="home-currency" content="${HOME}">`));
+  const etag = '"' + crypto.createHash('sha1').update(data).digest('base64url').slice(0, 20) + '"';
   const entry = { data, etag, mtime, type: TYPES[path.extname(name).toLowerCase()] || 'application/octet-stream' };
   fileCache.set(name, entry); return entry;
 }
@@ -996,6 +1078,8 @@ async function handle(req, res) {
   }
   if (p === '/api/calendar.ics') return out(res, 200, { 'Content-Type': 'text/calendar; charset=utf-8', 'Content-Disposition': 'attachment; filename="split-it.ics"', 'Cache-Control': 'no-store' }, icsFor(uid));
 
+  if (p === '/api/rates') return send(res, 200, (await refreshRates(), ratesView()));
+
   // ---------- running it: the owner's admin tools ----------
   if (p.startsWith('/api/admin/')) {
     if (!isOwner(uid)) return send(res, 403, { error: 'Only the owner can do that.' });
@@ -1010,7 +1094,7 @@ async function handle(req, res) {
       const invites = Object.values(users.invites || {}).filter(v => !v.used && v.exp > Date.now()).length;
       return send(res, 200, { people, backups: backupList().slice(0, 40), invites,
         health: { version: VERSION, node: process.version, uptime: Date.now() - STARTED, dbBytes: fs.existsSync(DB_FILE) ? fs.statSync(DB_FILE).size : 0, docs: Object.keys(db.docs).length,
-          photos, photoBytes, disk, lastBillRun, lastBackupAt, remindHour: REMIND_HOUR, copyDir: BACKUP_COPY_DIR, copyAt: copyState.at, copyError: copyState.error, publicUrl: process.env.PUBLIC_URL || null, email: !!process.env.RESEND_API_KEY, google: !!process.env.GOOGLE_CLIENT_ID, listeners: listeners.size, dataDir: DATA_DIR } });
+          photos, photoBytes, disk, lastBillRun, lastBackupAt, remindHour: REMIND_HOUR, copyDir: BACKUP_COPY_DIR, copyAt: copyState.at, copyError: copyState.error, publicUrl: process.env.PUBLIC_URL || null, homeCurrency: HOME, ratesDate: fx.date || null, ratesError: fxFresh() ? null : fx.error || null, email: !!process.env.RESEND_API_KEY, google: !!process.env.GOOGLE_CLIENT_ID, listeners: listeners.size, dataDir: DATA_DIR } });
     }
     if (p === '/api/admin/reset-link' && req.method === 'POST') {
       const { id } = await readBody(req); if (!users.users[id]) return send(res, 404, { error: 'No such person.' });
@@ -1117,6 +1201,7 @@ async function handle(req, res) {
     }
     saveDb();
     broadcast(ops.map(o => o.path), null, before);
+    try { leaversIn(uid, ops, before); } catch (e) { console.error(e); }
     send(res, 200, { ok: true });
     tellPeople(uid, ops, before).catch(e => console.error(e));
     if (ops.some(o => segs(o.path)[0] === 'recurring')) setImmediate(() => { try { postDueBills(); } catch (e) { console.error(e); } });   // a new bill due today shows up now
@@ -1139,6 +1224,7 @@ const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it
 // AI assistant connector (Muse, Claude...): see mcp.js
 const mcp = require('./mcp')({ DATA_DIR, db: () => db, users: () => users, saveDb, broadcast, tellPeople, allDebts, sharedEntries, netOf,
   nameFor, cad, segs, secure, findUser, tooManyTries, checkLogin, noteMiss, computeSplit, billDate, billNextKey, billFirstKey, simplified, pairwiseOf, version: VERSION,
+  home: HOME, rateTo, refreshRates, ratesView, entryProblem, canWrite, splitShares,
   needsCode: uid => accounts.needsCode(uid), checkCode: (uid, code) => accounts.checkCode(uid, code) });
 
 // The split engine and balance rules, for the tests (node --test test/*.test.js).
@@ -1152,6 +1238,7 @@ if (require.main === module) {
     if (+process.versions.node.split('.')[0] < 22) console.log(`Heads-up: this is Node ${process.version}. Split it is tested on Node 22 and 24; older ones no longer get security fixes.`);
     claimLock(); process.on('exit', dropLock);
     backup(); setInterval(backup, 60 * 60e3);
+    setInterval(() => refreshRates().catch(e => console.error(e)), 60 * 60e3); setTimeout(() => refreshRates().catch(e => console.error(e)), 8000);
     setInterval(() => billReminders().catch(e => console.error(e)), 10 * 60e3); setTimeout(() => billReminders().catch(e => console.error(e)), 5000);
     setInterval(() => { for (const res of listeners.keys()) res.write(': ping\n\n'); }, 25000);
     http.createServer((req, res) => handle(req, res).catch(e => { console.error(e); if (!res.headersSent) send(res, 500, { error: 'server error' }); }))
