@@ -63,6 +63,9 @@ before(async () => {
     GOOGLE_CLIENT_ID: '', GOOGLE_CLIENT_SECRET: '', PUBLIC_URL: '', RATES_URL: `http://127.0.0.1:${RATES_PORT}/latest` };
   for (const name of ['Ana', 'Ben', 'Dan']) assert.match(cli(['add-user', name], name.toLowerCase() + '-password\n'), /Added/);
   fs.mkdirSync(path.join(DATA, 'rates.json'));   // a rates file that can't be written (here: a folder in its place)
+  // a hand-over that ran out long ago, and a claims.json that can't be saved just now (a folder where its temp file goes)
+  fs.writeFileSync(path.join(DATA, 'claims.json'), JSON.stringify({ claims: { c_old: { id: 'c_old', by: 'u_gone', status: 'open', at: 1, exp: 2, guests: [], contact: null } } }));
+  fs.mkdirSync(path.join(DATA, 'claims.json.tmp'));
   proc = spawn(process.execPath, [SERVER], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   await new Promise((res, rej) => { let out = ''; const t = setTimeout(() => rej(new Error('server did not start: ' + out)), 15000);
     const on = d => { out += d; if (/running at/.test(out)) { clearTimeout(t); res(); } }; proc.stdout.on('data', on); proc.stderr.on('data', on); proc.on('exit', c => rej(new Error('server stopped early (' + c + '): ' + out))); });
@@ -74,8 +77,15 @@ before(async () => {
 after(async () => {
   if (proc) { const gone = new Promise(r => proc.on('exit', r)); proc.kill(); await gone; }
   if (rates) rates.close();
-  try { fs.rmdirSync(path.join(DATA, 'db.json.tmp')); } catch {}
+  for (const f of ['db.json.tmp', 'claims.json.tmp']) try { fs.rmdirSync(path.join(DATA, f)); } catch {}
   fs.rmSync(DIR, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
+test('tidying old hand-overs when claims.json can’t be saved still shows the list', async () => {
+  const r = await ana.get('/api/claims');
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(r.data.incoming, []);
+  fs.rmdirSync(path.join(DATA, 'claims.json.tmp'));
 });
 
 test('a request body that isn’t JSON, or is null, gets a 400, never a server error', async () => {

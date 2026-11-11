@@ -227,7 +227,7 @@ module.exports = function claims(h) {
       if (c.status === 'yes' && c.changes && now() - c.answeredAt > UNDO_DAYS * 864e5) { delete c.changes; n++; }
       if (c.status !== 'open' && now() - (c.answeredAt || c.at) > 120 * 864e5) { delete store.claims[id]; n++; }
     }
-    if (n) save();
+    if (n) try { save(); } catch (e) { console.error('claims.json:', e.message); }   // only tidying: a full disk mustn't stop the list showing
   }
   const view = (c, uid) => ({ id: c.id, status: c.status, at: c.at, exp: c.exp, answeredAt: c.answeredAt || null, by: c.by, byName: nameFor(c.by),
     to: c.to || null, toName: c.to ? nameFor(c.to) : null, viaLink: !!c.invite, name: c.contact?.name || c.guests[0]?.name || '',
