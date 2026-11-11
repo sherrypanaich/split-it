@@ -333,7 +333,8 @@ function sessionUid(req) {
 function keepSession(req, res) {
   const t = cookies(req).hs, s = sessionGet(users, t);
   if (!s || !userOf(s.uid) || !slideSession(s, SESSION_DAYS)) return;
-  saveUsers(); setCookie(req, res, t, SESSION_DAYS * 86400);
+  try { saveUsers(); } catch { return; }   // a full disk mustn't turn the page into an error; it's saved with the next change
+  setCookie(req, res, t, SESSION_DAYS * 86400);
 }
 const pruneSessions = () => { let n = 0; for (const [t, s] of Object.entries(users.sessions)) if (s.exp < Date.now() || !userOf(s.uid)) { delete users.sessions[t]; n++; } if (n) saveUsers(); };
 const secure = req => req.headers['x-forwarded-proto'] === 'https' || req.socket.encrypted;
@@ -1002,7 +1003,17 @@ function restoreFile(file, pass = '', { photosDir = null } = {}) {
       saveUsers(); }
     if (got.pushKeys) { fs.writeFileSync(PUSH_KEYS_FILE, got.pushKeys, { mode: 0o600 }); pushKeys = push.loadKeys(PUSH_KEYS_FILE); }
     if (got.push) { pushes = { subs: {}, ...got.push }; savePushes(); }
-    if (got.oauth) fs.writeFileSync(path.join(DATA_DIR, 'oauth.json'), got.oauth, { mode: 0o600 });
+    // Assistant sign-ins work like the people's: the ones this laptop has now stay as they are, so an assistant that was
+    // disconnected since the backup (or after a password reset) isn't let back in. A laptop with none takes the backup's.
+    if (got.oauth) {
+      const fp = path.join(DATA_DIR, 'oauth.json'); let cur = null, o = got.oauth;
+      try { cur = JSON.parse(fs.readFileSync(fp, 'utf8')); } catch {}
+      if (isPlainObject(cur) && isPlainObject(cur.tokens) && Object.keys(cur.tokens).length) {
+        const b = JSON.parse(o.toString('utf8')) || {};
+        o = Buffer.from(JSON.stringify({ ...b, clients: { ...(isPlainObject(b.clients) ? b.clients : {}), ...(isPlainObject(cur.clients) ? cur.clients : {}) }, tokens: cur.tokens, codes: {} }));
+      }
+      fs.writeFileSync(fp, o, { mode: 0o600 });
+    }
     if (got.claims) { fs.writeFileSync(path.join(DATA_DIR, 'claims.json'), got.claims, { mode: 0o600 }); claims.reload(); }
     let photos = 0;
     if (zip) for (const name of zip.names) if (/^photos\/[a-f0-9]{24}\.jpg$/.test(name)) { fs.writeFileSync(path.join(PHOTO_DIR, name.slice(7)), zip.read(name)); photos++; }
@@ -1066,7 +1077,8 @@ function refreshRates(force) {
       if (Object.keys(rates).length < 3 || !/^\d{4}-\d\d-\d\d$/.test(d?.date || '')) throw new Error('the rate service sent something unexpected');
       fx = { base, date: d.date, rates, fetchedAt: Date.now(), triedAt: Date.now(), error: null };
     } catch (e) { fx.error = e.message || 'couldn’t reach the rate service'; }
-    try { save(RATES_FILE, fx); } catch (e) { console.error(e); }
+    // Only a cache: a rates file that can't be written must not stop every other save (save() would mark the disk as failing).
+    try { const tmp = RATES_FILE + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(fx)); fs.renameSync(tmp, RATES_FILE); } catch (e) { console.error('Couldn’t save rates.json:', e.message); }
     return fx;
   })().finally(() => { fxBusy = null; });
   return fxBusy;
@@ -1437,11 +1449,16 @@ function myData(uid) {
 // Delete someone's own data. Their profile and private data go. Entries they share with others stay, so nobody's balance
 // changes, and show them as "Former member". Groups they made pass to someone still in them.
 function forgetPerson(uid) {
-  let removed = 0, kept = 0; const changed = [], before = {};
+  let removed = 0, kept = 0; const changed = [], before = {}, name = nameFor(uid);
+  // users.json first: if the disk refuses it, nothing has changed yet (not half a deletion with the account still there)
+  users.former = users.former || {}; users.former[uid] = Date.now();
+  try { saveUsers(); } catch (e) { delete users.former[uid]; throw e; }
   const put = (k, d) => { if (!Object.hasOwn(before, k)) before[k] = db.docs[k]; if (d == null) delete db.docs[k]; else db.docs[k] = d; changed.push(k); };
   for (const [k, d] of Object.entries(db.docs)) {
     const s = segs(k);
     if ((s[0] === 'data' && s[2] === uid) || (s[0] === 'people' && s[1] === uid)) { put(k, null); removed++; continue; }
+    // still in the group: their bills pause and the group picks who takes over (removeUser can't see it once they're a former member)
+    if (s[0] === 'groups' && s.length === 4 && s[3] === uid && d && d.active !== false) pauseBillsFor(s[1], uid, null, name);
     if (s[0] === 'groups' && s.length === 4 && s[3] === uid && d) put(k, { kind: 'guest', name: 'Former member', color: d.color || 0, active: false, leftAt: d.leftAt || Date.now(), joinedAt: d.joinedAt || null });
     if (s[0] === 'groups' && s.length === 2 && d?.createdBy === uid) {
       const next = activeMembers(s[1]).find(x => x !== uid);
@@ -1452,7 +1469,6 @@ function forgetPerson(uid) {
       if (others.length) kept++; else { put(k, null); removed++; }
     } else if (s[0] === 'expenses' && s.length === 2 && d && inEntry(uid, d) && (d.people || []).includes(uid)) kept++;
   }
-  users.former = users.former || {}; users.former[uid] = Date.now();
   removeUser(uid);
   dbDirty = true; flushDb(); broadcast(changed, null, before);   // on disk right away, not a moment later
   return { removed, kept };
@@ -1509,7 +1525,8 @@ const send = (res, code, body, type = 'application/json') =>
 const readBody = req => new Promise((res, rej) => {
   let n = 0; const chunks = [];
   req.on('data', c => { n += c.length; if (n > 2e6) { rej(new Error('too big')); req.destroy(); } else chunks.push(c); });
-  req.on('end', () => { try { res(JSON.parse(Buffer.concat(chunks).toString() || '{}')); } catch (e) { rej(e); } });
+  // Junk that isn't JSON is the sender's mistake (400, see the server's catch-all); JSON that isn't an object (null, 5) reads as {}.
+  req.on('end', () => { try { const v = JSON.parse(Buffer.concat(chunks).toString() || '{}'); res(v && typeof v === 'object' ? v : {}); } catch (e) { rej(Object.assign(e, { badRequest: true })); } });
 });
 const readRaw = (req, limit) => new Promise((res, rej) => {
   let n = 0; const chunks = [];
@@ -1599,7 +1616,7 @@ async function handle(req, res) {
     return send(res, 200, { ok: true });
   }
   if (p === '/api/logout') {
-    if (sessionDrop(users, cookies(req).hs)) saveUsers();
+    if (sessionDrop(users, cookies(req).hs)) try { saveUsers(); } catch {}   // gone from memory either way; the disk catches up later
     setCookie(req, res, '', 0);
     res.writeHead(302, { Location: '/login' }); return res.end();
   }
@@ -1789,7 +1806,7 @@ async function handle(req, res) {
 
   // ---------- your own data: take a copy, or delete it ----------
   if (p === '/api/me/export') {
-    const stamp = new Date().toISOString().slice(0, 10);
+    const stamp = localDay();
     return out(res, 200, { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="split-it-my-data-${stamp}.json"`, 'Cache-Control': 'no-store' }, JSON.stringify(myData(uid), null, 2));
   }
   if (p === '/api/me/delete' && req.method === 'POST') {
@@ -1851,6 +1868,7 @@ const accounts = require('./accounts')({ appName: 'Split it', envFile: 'split-it
 // Taking over history someone logged under your name before you joined: see claims.js
 const refreshFor = uids => { for (const [res, who] of listeners) if (uids.includes(who)) res.write('event: refresh\ndata: {}\n\n'); };
 const claims = require('./claims')({ DATA_DIR, docs: () => db.docs, users: () => users, saveDb, saveUsers, broadcast, refresh: refreshFor,
+  today: localDay, storageProblem, commit: paths => commitDb(paths),
   notify: (uids, msg) => notify(uids, msg).catch(e => console.error(e)), nameFor, segs, memberOf, cad, readBody, send, stamp: (uid, path, before, after) => stampEntry(uid, path, before, after) });
 
 // AI assistant connector (Muse, Claude...): see mcp.js
@@ -1877,7 +1895,8 @@ if (require.main === module) {
     setInterval(() => refreshRates().catch(e => console.error(e)), 60 * 60e3); setTimeout(() => refreshRates().catch(e => console.error(e)), 8000);
     setInterval(() => billReminders().catch(e => console.error(e)), 10 * 60e3); setTimeout(() => billReminders().catch(e => console.error(e)), 5000);
     setInterval(() => { for (const res of listeners.keys()) res.write(': ping\n\n'); }, 25000);
-    http.createServer((req, res) => handle(req, res).catch(e => { console.error(e); if (!res.headersSent) e && e.storage ? send(res, 507, { error: e.storageMessage }) : send(res, 500, { error: 'server error' }); }))
+    http.createServer((req, res) => handle(req, res).catch(e => { if (e && e.badRequest) { if (!res.headersSent) send(res, 400, { error: 'That request wasn’t readable.' }); return; }
+      console.error(e); if (!res.headersSent) e && e.storage ? send(res, 507, { error: e.storageMessage }) : send(res, 500, { error: 'server error' }); }))
       .listen(PORT, HOST, () => console.log(`Split it ${VERSION} running at http://${HOST}:${PORT}`));
   }
 }

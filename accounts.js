@@ -4,6 +4,16 @@
 // Split it and Budget it share this file word for word (Budget it's tests check it), so a fix made
 // for one reaches the other. Anything that differs between them comes in through `h`.
 //
+// What it gives the app (module.exports):
+//   accounts(h) -> handle(req, res, url, uid): answers the routes below and returns true, or false when they aren't its.
+//     h: users() (the users.json object), saveUsers, docs() (the records), saveDb, broadcast, hashPw, findUser,
+//     setCookie, cookies, clientIp, misses, tooManyTries, nameFor, readBody, send, file, secure, SESSION_DAYS, endSessions;
+//     optional: appName, envFile, cookieName, tagline, noteMiss, slowDown, notify, inviteInfo, onJoin, cancelClaim.
+//   handle also has: base(req) (the app's address), resetLink(req, uid), needsCode(uid), checkCode(uid, code),
+//     codeTicket(uid), codeOff(uid), totp(secret, step), startSession(req, res, uid), uniqueTag(name, but), ensureTags().
+//   Session helpers, also on module.exports: sessionKey(token) (the sha256 kept in users.json), sessionGet(store, token),
+//     sessionPut(store, token, rec), sessionDrop(store, token), migrateSessions(store), slideSession(rec, days, at).
+//
 // It stays private: nobody can sign up on their own. A new account needs an
 // invite link from someone already in. Google and email only sign in people
 // who already have an account (or who hold an invite).
@@ -408,7 +418,7 @@ module.exports = function accounts(h) {
     }
     if (p === '/api/friends/request' && m === 'POST') {
       const to = String((await readBody(req)).to || '');
-      if (!U().users[to] || to === uid) return send(res, 400, { error: 'Pick someone else.' }), true;
+      if (!Object.hasOwn(U().users, to) || to === uid) return send(res, 400, { error: 'Pick someone else.' }), true;
       if (areFriends(uid, to)) return send(res, 200, { ok: true, friends: true }), true;
       U().friendReqs = U().friendReqs || {};
       const back = Object.entries(U().friendReqs).find(([, r]) => r.from === to && r.to === uid);

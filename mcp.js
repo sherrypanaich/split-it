@@ -70,7 +70,7 @@ module.exports = function makeMcp(h) {
   });
   const readForm = async req => {
     const t = await readText(req);
-    if (/json/.test(req.headers['content-type'] || '')) { try { return JSON.parse(t || '{}'); } catch { return {}; } }
+    if (/json/.test(req.headers['content-type'] || '')) { try { const v = JSON.parse(t || '{}'); return v && typeof v === 'object' && !Array.isArray(v) ? v : {}; } catch { return {}; } }
     return Object.fromEntries(new URLSearchParams(t));
   };
 
@@ -86,7 +86,7 @@ module.exports = function makeMcp(h) {
     const rec = t && store.tokens[sha(t)];
     if (!rec || rec.kind === 'refresh' || (rec.exp && rec.exp < Date.now()) || !h.users().users[rec.uid]) return null;
     if (idle(rec, lastUse())) { tidy(); saveStore(); return null; }
-    if (Date.now() - (rec.used || 0) > 3600e3) { rec.used = Date.now(); saveStore(); }   // "last used", at most once an hour
+    if (Date.now() - (rec.used || 0) > 3600e3) { rec.used = Date.now(); try { saveStore(); } catch {} }   // "last used", at most once an hour (a full disk mustn't stop the assistant reading)
     return rec.uid;
   }
   // Which assistant is calling (one per app that signed in, one per key), for the duplicate guard. Never shown.
@@ -224,7 +224,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     }
     if (p === '/oauth/authorize') {
       const q = req.method === 'POST' ? await readForm(req) : Object.fromEntries(url.searchParams);
-      const c = store.clients[q.client_id];
+      const c = typeof q.client_id === 'string' && Object.hasOwn(store.clients, q.client_id) ? store.clients[q.client_id] : null;
       if (!c) return page(res, 400, `<div class="box"><h1>Unknown app</h1><p>Try connecting Split it from your assistant again.</p></div>`);
       if (!c.redirect_uris.includes(q.redirect_uri)) return page(res, 400, `<div class="box"><h1>That link doesn’t match</h1><p>Try connecting again from your assistant.</p></div>`);
       const back = params => { const u = new URL(q.redirect_uri); for (const [k, v] of Object.entries(params)) if (v) u.searchParams.set(k, v); res.writeHead(302, { Location: u.toString(), 'Cache-Control': 'no-store' }); res.end(); };
@@ -258,8 +258,9 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     if (p === '/oauth/token' && req.method === 'POST') {
       const m = await readForm(req);
       const basic = /^Basic\s+(\S+)/i.exec(req.headers.authorization || '');
-      if (basic) { const [i, s] = Buffer.from(basic[1], 'base64').toString().split(':').map(decodeURIComponent); m.client_id = m.client_id || i; m.client_secret = m.client_secret || s; }
-      const c = store.clients[m.client_id];
+      if (basic) { const dec = x => { try { return decodeURIComponent(x); } catch { return x; } };
+        const [i, s] = Buffer.from(basic[1], 'base64').toString().split(':').map(dec); m.client_id = m.client_id || i; m.client_secret = m.client_secret || s; }
+      const c = typeof m.client_id === 'string' && Object.hasOwn(store.clients, m.client_id) ? store.clients[m.client_id] : null;
       if (!c || (c.secret && sha(m.client_secret || '') !== c.secret)) return json(res, 401, { error: 'invalid_client' });
       let uid, since = Date.now();
       if (m.grant_type === 'authorization_code') {
@@ -360,7 +361,13 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     const sum = o => Object.values(o || {}).reduce((t, v) => t + v, 0);
     if (priv) {   // only this person sees it, so nobody to tell
       if (!Number.isSafeInteger(data.amount) || (data.kind === 'expense' && sum(data.split) !== data.amount)) throw new Error('The shares don’t add up to the total. Nothing was added.');
-      const p = privRoot(uid) + 'entries/' + id; docs()[p] = data; h.saveDb(); h.broadcast([p]); return;
+      const p = privRoot(uid) + 'entries/' + id;
+      if (h.writeOps) {   // the same save as the app's: a full disk, size and count limits are checked there
+        const r = h.writeOps(uid, [{ op: 'set', path: p, data }]);
+        if (r.status !== 200) throw new Error((r.body?.error || 'That couldn’t be saved.') + ' Nothing was added.');
+        return;
+      }
+      docs()[p] = data; h.saveDb(); h.broadcast([p]); return;
     }
     const p = 'expenses/' + id, before = { [p]: docs()[p] };
     if (h.writeOps) {   // the same path as a save from the app: rules, version, change log, notifications
@@ -623,8 +630,8 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
           .sort((a, b) => b[1].createdAt - a[1].createdAt);
         if (!mine.length) return 'Nothing to undo: you haven’t added anything through an assistant in the last 10 minutes.';
         const [k, e] = mine[0];
-        if (h.writeOps && k.startsWith('expenses/')) {   // to the bin, with a log line and a note to everyone in it
-          const r = h.writeOps(uid, [{ op: 'delete', path: k }]);
+        if (h.writeOps) {   // to the bin: a shared one with a log line and a note to everyone in it, a private one marked removed
+          const r = h.writeOps(uid, k.startsWith('expenses/') ? [{ op: 'delete', path: k }] : [{ op: 'update', path: k, data: { deletedAt: Date.now(), deletedBy: uid } }]);
           if (r.status !== 200) return `Couldn’t remove it: ${r.body?.error || 'the laptop refused'}.`;
         } else { docs()[k] = { ...e, deletedAt: Date.now(), deletedBy: uid }; h.saveDb(); h.broadcast([k]); }
         return `Removed ${e.kind === 'payment' ? 'the payment of ' + cad(e.amount) + ' to ' + nameOf(e.to) : q(e.title || 'the expense') + ' (' + cad(e.amount) + ')'}. It can be restored from the bin in the app within 30 days.`;
@@ -634,7 +641,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
   // ---------- MCP over streamable HTTP (stateless, plain JSON replies) ----------
   const VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
   async function rpc(uid, msg, caller) {
-    const { id, method, params = {} } = msg || {};
+    const { id, method } = msg || {}, params = msg && msg.params && typeof msg.params === 'object' ? msg.params : {};
     const ok = result => ({ jsonrpc: '2.0', id, result });
     const fail = (code, message) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message } });
     if (!msg || msg.jsonrpc !== '2.0' || typeof method !== 'string') return fail(-32600, 'Invalid request');
@@ -650,7 +657,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     if (method === 'tools/call') {
       const t = tools.find(x => x.name === params.name);
       if (!t) return fail(-32602, 'Unknown tool: ' + params.name);
-      const args = params.arguments || {};
+      const args = params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments) ? params.arguments : {};
       // a foreign amount needs today's rates: fetched (at most once a day, shared with the page) before the tool runs
       if (t.needsRates && t.needsRates(args) && h.refreshRates) await h.refreshRates().catch(() => {});
       viewer = uid;
