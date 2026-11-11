@@ -119,6 +119,11 @@ test('a second identical add from the same assistant within two minutes is refus
   assert.match(again.text, new RegExp(first.data.id));
   assert.deepStrictEqual([again.data.id, again.data.duplicate], [first.data.id, true]);
   assert.strictEqual((await expenses()).length, n, 'nothing new was saved');
+  const real = await S.tool(benKey, 'add_expense', { ...args, again: true });
+  assert.ok(!real.isError && real.data.duplicate === false && real.data.id !== first.data.id, 'again: true adds a real second one');
+  await S.tool(benKey, 'delete_last_expense');
+  const gl = await S.tool(benKey, 'list_groups');
+  assert.ok(Array.isArray(gl.data.groups) && gl.data.groups.some(g => g.name === 'Maple St' && g.members.includes('you') && Number.isInteger(g.yourBalanceCents)), 'list_groups has structured data');
   // something different, or another assistant, still goes in
   assert.ok(!(await S.tool(benKey, 'add_expense', { ...args, amount: 54.3 })).data.duplicate);
   const other = S.key('Ben');

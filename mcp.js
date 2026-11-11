@@ -436,13 +436,18 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
       inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true },
       run(uid) {
         const gs = groupsOf(uid).filter(g => !g.archived), list = h.sharedEntries();
-        if (!gs.length) return 'You’re not in any groups yet.';
-        return gs.map(g => {
-          const members = memberDocs(g.id).filter(m => m.active !== false).map(m => label(m.id, uid));
+        if (!gs.length) return { text: 'You’re not in any groups yet.', data: { currency: HOME, groups: [] } };
+        const data = { currency: HOME, groups: [] };
+        const text = gs.map(g => {
+          const ids = memberDocs(g.id).filter(m => m.active !== false).map(m => m.id), members = ids.map(id => label(id, uid));
           const v = h.netOf(list.filter(e => e.groupId === g.id))[uid] || 0;
-          const trip = g.cur && g.cur !== HOME ? ` A trip group paying in ${g.cur} (card fee ${g.cardFee ?? 2.5}%): give a currency when adding expenses.` : '';
+          const tripCur = g.cur && g.cur !== HOME ? g.cur : null;
+          data.groups.push({ name: g.name, currency: tripCur || HOME, cardFeePercent: tripCur ? Number(g.cardFee ?? 2.5) : null,
+            members: ids.map(id => id === uid ? 'you' : nameOf(id)), yourBalance: dollars(v), yourBalanceCents: v });
+          const trip = tripCur ? ` A trip group paying in ${g.cur} (card fee ${g.cardFee ?? 2.5}%): give a currency when adding expenses.` : '';
           return `${q(g.name)}: ${members.join(', ')}. ${v > 0 ? 'You’re owed ' + cad(v) : v < 0 ? 'You owe ' + cad(-v) : 'You’re all square'} in this group.${trip}`;
         }).join('\n');
+        return { text, data };
       } },
     { name: 'recent_expenses', title: 'Recent expenses',
       description: 'Lists recent Split it expenses and payments that include the signed-in person, newest first, including private one-on-ones with friends who are not on the app. Optionally only one group.' + USER_TEXT,
@@ -463,6 +468,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     { name: 'add_expense', title: 'Add an expense',
       get description() { return `Adds a shared expense to Split it. Give either a group name, or one person (for a one-on-one expense). By default the signed-in person paid and everyone active in the group (or both people) shares it equally. For an uneven split give shares (weights, like 2 for a couple and 1 for a single) or exact_amounts (amounts per person, adding up to the total). Amounts are in ${HOME_NAME} (${HOME}) unless you give currency. A trip group pays in another currency: there you must say which currency the amount is in, and a foreign amount is turned into ${HOME} at the day's rate plus the group's card fee. Confirm the details with the user before calling. The reply ends with "Your share: …" and also carries the numbers as structured data (yourShare, total, currency).` + USER_TEXT; },
       inputSchema: { type: 'object', additionalProperties: false, required: ['title', 'amount'], properties: {
+        again: { type: 'boolean', description: 'Set to true only when the user confirms this is a second, separate one with the same details (otherwise a repeat within 2 minutes is treated as a retry and not added twice).' }, 
         title: { type: 'string', description: 'What it was for, e.g. "Groceries"' },
         amount: { type: 'number', description: 'Total, e.g. 54.20, in the currency below' },
         currency: { type: 'string', description: `3-letter code of the currency the amount is in, e.g. "EUR". Defaults to ${HOME}, except in a trip group, where it has to be given.` },
@@ -512,8 +518,8 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         if (!(amount > 0) || amount > 1e9) throw new Error('That amount is too big.');
         const where = g ? 'g:' + g.id : 'p:' + pool[1];
         const dupKey = ['exp', uid, ctx.caller || '', title.toLowerCase(), typed, cur, date, where].join('|');
-        const dup = already(dupKey);
-        if (dup) return { text: `Already added: ${q(dup.e.title)} ${cad(dup.e.amount)} on ${dup.e.date} (id ${dup.id}). It was not added again. ${dup.e.split?.[uid] ? 'Your share: ' + cad(dup.e.split[uid]) + '.' : 'You’re not in this split.'}`, data: expenseData(uid, dup.id, dup.e, g, true) };
+        const dup = a.again === true ? null : already(dupKey);
+        if (dup) return { text: `Already added: ${q(dup.e.title)} ${cad(dup.e.amount)} on ${dup.e.date} (id ${dup.id}). It was not added again (if it really is a second one, ask again with again: true). ${dup.e.split?.[uid] ? 'Your share: ' + cad(dup.e.split[uid]) + '.' : 'You’re not in this split.'}`, data: expenseData(uid, dup.id, dup.e, g, true) };
         const who = n => { const r = pick(n, pool); if (r.err) throw new Error(r.err); return r.id === '__me__' ? uid : r.id; };
         const paidBy = a.paid_by ? who(a.paid_by) : uid;
         if (!pool.includes(paidBy)) throw new Error('You’re not an active member of that group.');
@@ -549,6 +555,7 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
     { name: 'record_payment', title: 'Record a payment',
       get description() { return `Records that the signed-in person paid someone back (for example by e-Transfer), in ${HOME_NAME} (${HOME}). If the other person uses the app, they confirm it there. Confirm with the user before calling. The numbers also come back as structured data.` + USER_TEXT; },
       inputSchema: { type: 'object', additionalProperties: false, required: ['to', 'amount'], properties: {
+        again: { type: 'boolean', description: 'Set to true only when the user confirms this is a second, separate one with the same details (otherwise a repeat within 2 minutes is treated as a retry and not added twice).' }, 
         to: { type: 'string', description: 'Who was paid' }, amount: { type: 'number', description: `Amount in ${HOME}` },
         currency: { type: 'string', description: `Leave out, or "${HOME}". Payments are only recorded in ${HOME}.` },
         group: { type: 'string', description: 'Group it was for. Leave out for one-on-one.' } } },
@@ -565,8 +572,8 @@ button{width:100%;margin-top:18px;font:inherit;font-weight:800;font-size:1rem;pa
         const r = pick(a.to, pool.filter(id => id !== uid)); if (r.err) throw new Error(r.err); if (r.id === '__me__') throw new Error('You can’t pay yourself. Give the name of the person you paid.');
         const to = r.id, confirmed = !h.users().users[to], priv = !g && isContact(uid, to), date = today();
         const dupKey = ['pay', uid, ctx.caller || '', to, amount, date, g ? g.id : ''].join('|');
-        const dup = already(dupKey);
-        if (dup) return { text: `Already recorded: you paid ${nameOf(to)} ${cad(amount)} today (id ${dup.id}). It was not recorded again.`, data: paymentData(dup.id, dup.e, g, true) };
+        const dup = a.again === true ? null : already(dupKey);
+        if (dup) return { text: `Already recorded: you paid ${nameOf(to)} ${cad(amount)} today (id ${dup.id}). It was not recorded again (if it really is a second one, ask again with again: true).`, data: paymentData(dup.id, dup.e, g, true) };
         const id = 'p' + rand(6).replace(/[^A-Za-z0-9]/g, '') + Date.now().toString(36).slice(-3);
         const data = { kind: 'payment', from: uid, to, amount, date, createdAt: Date.now(), addedBy: uid, confirmed, people: [uid, to], ...(priv ? { friendId: to } : { groupId: g ? g.id : null }), via: 'assistant' };
         save(uid, id, data, priv);
