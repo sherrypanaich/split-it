@@ -41,7 +41,7 @@ self.addEventListener('fetch', e => {
     return;
   }
   if (url.pathname === '/shim.js') return e.respondWith(networkFirst(req, SHELL));
-  if (/^\/(art\/|icon|apple-touch-icon|manifest\.webmanifest|api\/photo\/)/.test(url.pathname)) return e.respondWith(staleWhileRevalidate(req, SHELL));
+  if (/^\/(art\/|vendor\/tesseract\/|icon|apple-touch-icon|manifest\.webmanifest|api\/photo\/)/.test(url.pathname)) return e.respondWith(staleWhileRevalidate(req, SHELL));
   if (READ_API.test(url.pathname + url.search)) return e.respondWith(networkFirst(req, DATA));
 });
 
