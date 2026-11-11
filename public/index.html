@@ -1805,7 +1805,7 @@ async function choreDone(id){
   const n = (c.order||[]).length || 1, base = c.due && c.due >= today() ? c.due : today();
   if(await write(()=>db.doc('chores/'+id).update({turn:((c.turn||0)+1) % n, due:nextDate(base, c.every||7), lastBy:myUid, lastAt:Date.now()}))){
     const nx = (c.order||[])[((c.turn||0)+1) % n]; buzz(15);
-    toast(`Nice! ${nx && nx!==myUid ? firstName(nx)+'’s turn next' : 'Done'}`);
+    toast(`Nice! ${!nx || n===1 ? 'Done' : nx===myUid ? 'Your turn next' : firstName(nx)+'’s turn next'}`);
   }
 }
 function choreRow(c, showGroup){
