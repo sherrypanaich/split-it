@@ -2559,8 +2559,8 @@ function openExpense(opts={}){
       if(st.mode==='items') $('#amt').value = a ? (a/100).toFixed(2) : '';
       $('#rateRow').hidden = $('#feeRow').hidden = st.cur===HOME; $('#rcur').textContent = st.cur;
       $('#conv').textContent = st.cur!==HOME && a && rate() ? '= '+money(cadAmt())+(fee()?` with the ${fee()}% card fee`:'') : '';
-      const rn = $('#rateNote'), ri = st.rateInfo; rn.hidden = st.cur===HOME || !ri;
-      if(!rn.hidden) rn.textContent = ri.none ? `Couldn’t get a rate for ${st.cur}. Type how many ${HOME} one ${st.cur} is worth.` : `Rate from ${dayLabel(ri.date)||ri.date}${ri.stale?'. The rate service isn’t answering, so this is the last one we got. Check it before saving.':', European Central Bank.'}`;
+      const rn = $('#rateNote'), ri = st.rateInfo; rn.hidden = st.cur===HOME || !ri || (!ri.none && !ri.date);
+      if(!rn.hidden) rn.textContent = ri.none ? `Couldn’t get a rate for ${st.cur}. Type how many ${HOME} one ${st.cur} is worth.` : `Rate from ${dayLabel(ri.date).replace(/^(Today|Yesterday)$/, w => w.toLowerCase())}${ri.stale?'. The rate service isn’t answering, so this is the last one we got. Check it before saving.':', European Central Bank.'}`;
       mem.forEach(id => { const el = sh.querySelector(`[data-share="${CSS.escape(id)}"]`); if(el) el.textContent = !sp[id] ? '—' : (st.repeat&&st.variable) ? Math.round(sp[id]/previewAmt()*100)+'%' : fmtCur(sp[id], st.cur); });
       let msg='', bad=false;
       const pctSum = Object.values(inp.pct||{}).reduce((s,v)=>s+v,0);
@@ -2652,13 +2652,13 @@ function openExpense(opts={}){
       if(q==='theyowe'){ st.paidBy=myUid; st.mode='equal'; st.ids=new Set([ctx.id]); }
       if(q==='iowe'){ st.paidBy=ctx.id; st.mode='equal'; st.ids=new Set([myUid]); }
       press('data-pb',st.paidBy); drawRows(); });
-    $('#cur').onchange = async () => { st.cur = $('#cur').value; st.rateInfo = null; if(st.drawTwo) st.drawTwo(); if(st.cur!==HOME && !$('#rate').value) $('#rate').value = rememberedRate(st.cur); check();
+    $('#cur').onchange = async () => { st.cur = $('#cur').value; st.rateInfo = null; if(st.drawTwo) st.drawTwo(); if(st.cur!==HOME) $('#rate').value = rememberedRate(st.cur); check();
       if(st.cur!==HOME && !st.repeat){ const cur = st.cur, live = await liveRate(cur); if(st.cur!==cur || !sh.isConnected) return;
         if(live){ st.rateInfo = live; $('#rate').value = live.rate.toFixed(4); $('#rate').title = 'European Central Bank rate, via frankfurter.app'; }
         else { st.rateInfo = $('#rate').value ? null : {none:true}; if(!$('#rate').value) $('#rate').focus(); }
         check(); } };
-    if(tripCur) $('#cur').onchange();   // fetch today's rate for the trip's currency
-    $('#rate').oninput = () => { if(st.rateInfo && !st.rateInfo.none) st.rateInfo = null; check(); }; $('#fee').oninput = check;
+    if(tripCur || (pre && !src && st.cur!==HOME)) $('#cur').onchange();   // fetch today's rate for the trip's (or the note's) currency
+    $('#rate').oninput = () => { st.rateInfo = null; check(); }; $('#fee').oninput = check;
     const chg = $('#chg'); if(chg) chg.onclick = () => pickContext(c => openExpense({...opts, ctx:c, copyOf:null, prefill:{...(pre||{}), title:$('#ttl').value, amount:foreignAmt(), cur:st.cur, cat:st.cat, date:$('#dt').value, note:$('#nt')?.value||'', ai:false, items:null}}), 'Move it to…');
     if($('#rep')) $('#rep').onchange = () => { st.repeat = $('#rep').checked; if(!st.repeat) st.variable=false; syncRepeat(); };
     if($('#var')) $('#var').onchange = () => { st.variable = $('#var').checked; syncRepeat(); };
