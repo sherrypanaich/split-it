@@ -1,5 +1,6 @@
 // Accounts: invite links, email (through Resend), password reset, email sign-in links,
-// Sign in with Google, change password, a sign-in code from an authenticator app, sign out everywhere.
+// Sign in with Google, change password, a sign-in code from an authenticator app, sign out everywhere,
+// and finding people already on the app: a unique @tag each, friend requests, and a friend link (QR code).
 // Split it and Budget it share this file word for word (Budget it's tests check it), so a fix made
 // for one reaches the other. Anything that differs between them comes in through `h`.
 //
@@ -135,16 +136,40 @@ module.exports = function accounts(h) {
   }
   function createFromInvite(inv, fields) {
     const id = 'u_' + crypto.randomBytes(11).toString('hex');
-    U().users[id] = { owner: false, invitedBy: inv.by, createdAt: now(), ...fields };
+    U().users[id] = { owner: false, invitedBy: inv.by, createdAt: now(), ...fields, tag: uniqueTag(fields.name) };
     inv.used = now(); inv.uid = id;
     saveUsers();
-    if (U().users[inv.by]) {   // friends with whoever sent the link, both ways
-      const a = `data/users/${inv.by}/root/friends/${id}`, b = `data/users/${id}/root/friends/${inv.by}`;
-      docs()[a] = { kind: 'account', addedAt: now() }; docs()[b] = { kind: 'account', addedAt: now() };
-      saveDb(); broadcast([a, b]);
-    }
+    if (U().users[inv.by]) makeFriends(inv.by, id);   // friends with whoever sent the link, both ways
+    if (h.onJoin) h.onJoin(inv, id);   // a personal invite: the history it carries waits for their yes
     return id;
   }
+
+  // ---------- finding people already on the app ----------
+  // Everyone has a unique @tag (letters, numbers and _), picked from their name and changeable later.
+  // You find someone by their exact tag or exact checked email, never by browsing, and adding them is a
+  // request they accept. A friend link (shown as a QR code) skips the request: sharing it is the yes.
+  const TAG_RE = /^[a-z0-9_]{3,20}$/;
+  const cleanTag = t => String(t || '').trim().toLowerCase().replace(/^@/, '');
+  const tagTaken = (t, but) => Object.entries(U().users).some(([id, u]) => id !== but && u.tag === t);
+  function uniqueTag(name, but) {
+    let b = String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '').slice(0, 16);
+    if (b.length < 3) b = (b + 'friend').slice(0, 6);
+    if (!tagTaken(b, but)) return b;
+    for (let i = 2; i < 1000; i++) if (!tagTaken(b + i, but)) return b + i;
+    return b + rand(3).toLowerCase().replace(/[^a-z0-9]/g, '');
+  }
+  function ensureTags() { let n = 0; for (const [id, u] of Object.entries(U().users)) if (!u.tag) { u.tag = uniqueTag(u.name, id); n++; } if (n) saveUsers(); }
+  const friendPath = (a, b) => `data/users/${a}/root/friends/${b}`;
+  const areFriends = (a, b) => docs()[friendPath(a, b)]?.kind === 'account' && docs()[friendPath(b, a)]?.kind === 'account';
+  function makeFriends(a, b) {
+    const ps = [friendPath(a, b), friendPath(b, a)].filter(p => docs()[p]?.kind !== 'account');
+    for (const p of ps) docs()[p] = { ...(docs()[p] || {}), kind: 'account', addedAt: now() };
+    if (ps.length) { saveDb(); broadcast(ps); }
+  }
+  const lookups = new Map();   // uid -> recent lookups, so nobody can walk through every tag
+  const tooManyLookups = uid => { const l = (lookups.get(uid) || []).filter(t => now() - t < 10 * 60e3); l.push(now()); lookups.set(uid, l); return l.length > 30; };
+  const card = id => ({ uid: id, name: nameFor(id), tag: U().users[id]?.tag || null });
+  const tell = (uids, msg) => { if (h.notify) Promise.resolve(h.notify(uids, msg)).catch(() => {}); };
 
   // ---------- Google ----------
   const gStates = new Map();   // state -> { mode, uid, invite, exp }
@@ -216,7 +241,7 @@ module.exports = function accounts(h) {
       const { token, name, password } = await readBody(req);
       const inv = liveInvite(token);
       if (!inv) { miss(req); return send(res, 410, { error: 'This invite link has expired or was already used. Ask your friend for a new one.' }), true; }
-      if (name === undefined) return send(res, 200, { ok: true, from: nameFor(inv.by), google: !!(G_ID && G_SECRET) }), true;
+      if (name === undefined) return send(res, 200, { ok: true, from: nameFor(inv.by), google: !!(G_ID && G_SECRET), waiting: h.inviteInfo ? h.inviteInfo(inv) : null }), true;
       const n = String(name || '').trim().replace(/\s+/g, ' ');
       if (n.length < 2 || n.length > 30) return send(res, 400, { error: 'Pick a name between 2 and 30 characters.' }), true;
       if (n.includes('@')) return send(res, 400, { error: 'Use a name, not an email. You can add your email after.' }), true;
@@ -300,6 +325,7 @@ module.exports = function accounts(h) {
     }
 
     if (!me) return false;   // everything below needs a signed-in person
+    if (!me.tag) ensureTags();
 
     if (p === '/api/invite' && m === 'POST') {
       U().invites = U().invites || {};
@@ -311,8 +337,82 @@ module.exports = function accounts(h) {
       saveUsers();
       return send(res, 200, { token, exp: U().invites[token].exp }), true;
     }
+    // your open invite links, so you can see who hasn't joined yet and cancel a link
+    if (p === '/api/invites' && m === 'GET') {
+      const list = Object.entries(U().invites || {}).filter(([, v]) => v.by === uid && !v.used && v.exp > now())
+        .map(([t, v]) => ({ id: sha(t).slice(0, 16), at: v.at, exp: v.exp, name: v.name || null, claim: v.claim || null })).sort((a, b) => b.at - a.at);
+      return send(res, 200, { list }), true;
+    }
+    if (p === '/api/invites/cancel' && m === 'POST') {
+      const { id } = await readBody(req);
+      const hit = Object.entries(U().invites || {}).find(([t, v]) => v.by === uid && !v.used && sha(t).slice(0, 16) === id);
+      if (!hit) return send(res, 404, { error: 'That link is already gone.' }), true;
+      delete U().invites[hit[0]]; saveUsers();
+      if (hit[1].claim && h.cancelClaim) h.cancelClaim(hit[1].claim);
+      return send(res, 200, { ok: true }), true;
+    }
+
+    // ---------- @tags, friend requests, friend links ----------
+    if (p === '/api/account/tag' && m === 'POST') {
+      const t = cleanTag((await readBody(req)).tag);
+      if (!TAG_RE.test(t)) return send(res, 400, { error: 'Use 3 to 20 letters, numbers or _.' }), true;
+      if (tagTaken(t, uid)) return send(res, 409, { error: `@${t} is taken. Try another.` }), true;
+      me.tag = t; saveUsers();
+      return send(res, 200, { ok: true, tag: t }), true;
+    }
+    if (p === '/api/people/find' && m === 'POST') {
+      if (tooManyLookups(uid)) return send(res, 429, { error: 'That’s a lot of searching. Wait a few minutes.' }), true;
+      const q = String((await readBody(req)).q || '').trim().toLowerCase();
+      let hit = null;
+      if (q.includes('@') && q.includes('.') && !q.startsWith('@')) hit = userByEmail(q);
+      else { const t = cleanTag(q); hit = Object.entries(U().users).find(([, u]) => u.tag === t); }
+      if (!hit) return send(res, 404, { error: q.includes('.') ? 'Nobody here has that email checked on their account.' : 'Nobody here has that tag.' }), true;
+      if (hit[0] === uid) return send(res, 400, { error: 'That’s you.' }), true;
+      return send(res, 200, { ...card(hit[0]), friend: areFriends(uid, hit[0]),
+        asked: Object.values(U().friendReqs || {}).some(r => r.from === uid && r.to === hit[0]) }), true;
+    }
+    if (p === '/api/friends/requests' && m === 'GET') {
+      const all = Object.entries(U().friendReqs || {});
+      return send(res, 200, { incoming: all.filter(([, r]) => r.to === uid && U().users[r.from]).map(([id, r]) => ({ id, at: r.at, ...card(r.from) })),
+        outgoing: all.filter(([, r]) => r.from === uid && U().users[r.to]).map(([id, r]) => ({ id, at: r.at, ...card(r.to) })) }), true;
+    }
+    if (p === '/api/friends/request' && m === 'POST') {
+      const to = String((await readBody(req)).to || '');
+      if (!U().users[to] || to === uid) return send(res, 400, { error: 'Pick someone else.' }), true;
+      if (areFriends(uid, to)) return send(res, 200, { ok: true, friends: true }), true;
+      U().friendReqs = U().friendReqs || {};
+      const back = Object.entries(U().friendReqs).find(([, r]) => r.from === to && r.to === uid);
+      if (back) { delete U().friendReqs[back[0]]; saveUsers(); makeFriends(uid, to); return send(res, 200, { ok: true, friends: true }), true; }   // they asked you already
+      if (Object.values(U().friendReqs).some(r => r.from === uid && r.to === to)) return send(res, 200, { ok: true, asked: true }), true;
+      if (Object.values(U().friendReqs).filter(r => r.from === uid).length >= 30) return send(res, 429, { error: 'You have 30 requests waiting. Wait for some answers first.' }), true;
+      U().friendReqs[rand(9)] = { from: uid, to, at: now() }; saveUsers();
+      tell([to], { title: `${nameFor(uid)} wants to be friends`, body: `@${me.tag} on ${APP}. Open it to accept.`, tag: 'friend-' + uid });
+      return send(res, 200, { ok: true, asked: true }), true;
+    }
+    if (p === '/api/friends/answer' && m === 'POST') {
+      const { id, yes } = await readBody(req);
+      const r = typeof id === 'string' && Object.hasOwn(U().friendReqs || {}, id) ? U().friendReqs[id] : null;
+      if (!r || (r.to !== uid && r.from !== uid)) return send(res, 404, { error: 'That request is gone.' }), true;
+      delete U().friendReqs[id]; saveUsers();   // the sender taking it back, or the other person answering
+      if (yes && r.to === uid && U().users[r.from]) { makeFriends(uid, r.from); tell([r.from], { title: `${nameFor(uid)} accepted`, body: `You’re friends on ${APP} now.`, tag: 'friend-' + uid }); }
+      return send(res, 200, { ok: true }), true;
+    }
+    if (p === '/api/friends/link' && m === 'POST') {
+      if (!me.friendToken || (await readBody(req)).fresh) { me.friendToken = rand(15); saveUsers(); }
+      return send(res, 200, { url: `${base(req)}/#add=${me.friendToken}`, tag: me.tag }), true;
+    }
+    if (p === '/api/friends/link/use' && m === 'POST') {
+      const wait = tooManyTries(req); if (wait) return send(res, 429, { error: wait }), true;
+      const t = String((await readBody(req)).token || '');
+      const hit = t && Object.entries(U().users).find(([, u]) => u.friendToken && u.friendToken.length === t.length && same(u.friendToken, t));
+      if (!hit) { miss(req); return send(res, 404, { error: 'That friend link was changed or doesn’t exist.' }), true; }
+      if (hit[0] === uid) return send(res, 400, { error: 'That’s your own friend link.' }), true;
+      makeFriends(uid, hit[0]);
+      tell([hit[0]], { title: `${nameFor(uid)} added you`, body: `They used your friend link. You’re friends on ${APP} now.`, tag: 'friend-' + uid });
+      return send(res, 200, { ok: true, ...card(hit[0]) }), true;
+    }
     if (p === '/api/account' && m === 'GET') {
-      return send(res, 200, { name: me.name, email: me.emailVerified ? me.email : null, pendingEmail: me.pendingEmail || null,
+      return send(res, 200, { name: me.name, tag: me.tag || null, email: me.emailVerified ? me.email : null, pendingEmail: me.pendingEmail || null,
         google: !!me.google, googleEmail: me.googleEmail || null, hasPassword: !!me.hash,
         code: needsCode(uid), backupCodes: me.totp?.on ? (me.totp.backup || []).length : 0,
         options: { google: !!(G_ID && G_SECRET), email: !!RESEND } }), true;
@@ -387,6 +487,7 @@ module.exports = function accounts(h) {
   handle.base = base;
   // A one-time reset link the owner can hand to someone who is locked out (works for a day).
   handle.resetLink = (req, uid) => `${base(req)}/login#reset=${makeCode('reset', { uid }, 60 * 24)}`;
-  Object.assign(handle, { needsCode, checkCode, codeTicket, codeOff, totp });
+  Object.assign(handle, { needsCode, checkCode, codeTicket, codeOff, totp, uniqueTag, ensureTags });
+  ensureTags();
   return handle;
 };
