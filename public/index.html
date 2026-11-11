@@ -3829,9 +3829,13 @@ document.getElementById('receipt').onchange = async ev => {
 };
 
 /* ================= receipt reading on the phone itself (Tesseract.js, no AI, no account) ================= */
+// On the laptop the reader is served by the app itself (public/vendor/tesseract), so nothing loads from outside hosts.
+// The published artifact has no such folder, so there it falls back to the same pinned version on jsdelivr, checked by hash.
 let tessP = null;
+const TESS = LAPTOP ? { src: '/vendor/tesseract/tesseract.min.js', opts: { workerPath: location.origin + '/vendor/tesseract/worker.min.js', corePath: location.origin + '/vendor/tesseract/', langPath: location.origin + '/vendor/tesseract', workerBlobURL: false } }
+  : { src: 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js', sri: 'sha384-GJqSu7vueQ9qN0E9yLPb3Wtpd7OrgK8KmYzC8T1IysG1bcvxvIO4qtYR/D3A991F', opts: { corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@5.1.1' } };
 const loadTesseract = () => tessP || (tessP = new Promise((res, rej) => { if(window.Tesseract) return res(window.Tesseract);
-  const sc = document.createElement('script'); sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'; sc.onload = () => res(window.Tesseract); sc.onerror = () => { tessP = null; rej(new Error('load')); }; document.head.appendChild(sc); }));
+  const sc = document.createElement('script'); sc.src = TESS.src; if(TESS.sri){ sc.integrity = TESS.sri; sc.crossOrigin = 'anonymous'; } sc.onload = () => res(window.Tesseract); sc.onerror = () => { tessP = null; rej(new Error('load')); }; document.head.appendChild(sc); }));
 function parseReceipt(text){
   const lines = text.split(/\n/).map(l=>l.trim()).filter(Boolean);
   const num = l => { const m = l.replace(/,(\d{2})\b/g,'.$1').match(/(\d+\.\d{2})\s*[A-Z]?\s*$/); return m ? parseFloat(m[1]) : null; };
@@ -3865,7 +3869,7 @@ async function ocrReceipt(file){
     const k = Math.min(1, 1800/Math.max(bmp.width, bmp.height)), c = document.createElement('canvas'); c.width = Math.round(bmp.width*k); c.height = Math.round(bmp.height*k);
     const x = c.getContext('2d'); x.filter = 'grayscale(1) contrast(1.25)'; x.drawImage(bmp, 0, 0, c.width, c.height);
     say('Loading the reader (first time takes a moment)…', 10);
-    worker = await T.createWorker('eng', 1, { logger: m => { if(m.status==='recognizing text') say('Reading…', 30 + m.progress*70); } });
+    worker = await T.createWorker('eng', 1, { ...TESS.opts, logger: m => { if(m.status==='recognizing text') say('Reading…', 30 + m.progress*70); } });
     if(st.stop) return;
     const { data } = await worker.recognize(c);
     if(st.stop) return;

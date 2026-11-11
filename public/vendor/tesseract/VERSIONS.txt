@@ -1,0 +1,12 @@
+Tesseract.js receipt reader, served from the app itself (no outside hosts).
+tesseract.min.js, worker.min.js: npm tesseract.js@5.1.1 (dist/)
+tesseract-core-*.wasm.js: npm tesseract.js-core@5.1.1
+eng.traineddata.gz: npm @tesseract.js-data/eng@1.0.0 (4.0.0_best_int), the same model the page loaded from the CDN before
+Licence: Apache-2.0 (LICENSE.txt, NOTICES.txt)
+
+sha256:
+8f04aa0cc81e7bde33f80e92fa01a7a665f0b4884d098acf5de9c7104a11dfaa  tesseract-core-lstm.wasm.js
+ce20eda9533cbed1e6c2b4276fbae1e0adc61b6754b5513084be601787b457cf  tesseract-core-simd-lstm.wasm.js
+a8e29918d098b2b06e1012bdaeffb4aec0445c5d5654709023e0bd1f442a80e8  tesseract.min.js
+aca1229639fc9907d86f96e825955a2b7c5716d17f3bc3acd71f9c7ab66181fc  worker.min.js
+45b4cb346724ac1774f1c36f42f182b887bcdb28ebe63e6fff90ac41f3fcff91  eng.traineddata.gz

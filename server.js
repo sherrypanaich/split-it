@@ -1413,13 +1413,13 @@ const gzOk = req => /\bgzip\b/.test(req?.headers?.['accept-encoding'] || '');
 const compressible = type => /json|text|javascript|xml|svg|calendar|manifest/.test(type);
 const SECURITY = {
   'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin', 'X-Frame-Options': 'SAMEORIGIN',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://cdn.jsdelivr.net https://tessdata.projectnaptha.com https://api.frankfurter.app https://api.frankfurter.dev; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self' https://accounts.google.com"
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: blob:; connect-src 'self' https://api.frankfurter.app https://api.frankfurter.dev; worker-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self' https://accounts.google.com"
 };
 // One place that sends bytes: gzip when the phone accepts it, plus the security headers.
 function out(res, code, headers, body) {
   const req = res.req, h = { ...SECURITY, ...headers };
   let buf = Buffer.isBuffer(body) ? body : Buffer.from(body == null ? '' : String(body));
-  if (buf.length > 800 && compressible(h['Content-Type'] || '') && gzOk(req)) { buf = zlib.gzipSync(buf, { level: 6 }); h['Content-Encoding'] = 'gzip'; h.Vary = 'Accept-Encoding'; }
+  if (buf.length > 800 && !h['Content-Encoding'] && compressible(h['Content-Type'] || '') && gzOk(req)) { buf = zlib.gzipSync(buf, { level: 6 }); h['Content-Encoding'] = 'gzip'; h.Vary = 'Accept-Encoding'; }
   h['Content-Length'] = buf.length;
   res.writeHead(code, h);
   res.end(req && req.method === 'HEAD' ? undefined : buf);
@@ -1463,6 +1463,11 @@ function file(res, name, type, cache) {
   const f = staticFile(name); if (!f) return send(res, 404, { error: 'not found' });
   const h = { 'Content-Type': type || f.type, 'Cache-Control': cache || 'no-cache', ETag: f.etag };
   if (res.req.headers['if-none-match'] === f.etag) { res.writeHead(304, { ...SECURITY, ETag: f.etag, 'Cache-Control': h['Cache-Control'] }); return res.end(); }
+  // Big files (the receipt reader is ~4 MB) are compressed once and kept, not on every request.
+  if (f.data.length > 1e6 && compressible(h['Content-Type']) && gzOk(res.req)) {
+    f.gz = f.gz || zlib.gzipSync(f.data, { level: 6 });
+    return out(res, 200, { ...h, 'Content-Encoding': 'gzip', Vary: 'Accept-Encoding' }, f.gz);
+  }
   out(res, 200, h, f.data);
 }
 // Files anyone can fetch without signing in: what the phone needs to install the app, and the guide art for the sign-in pages.
@@ -1529,6 +1534,8 @@ async function handle(req, res) {
   if (p === '/shim.js') return file(res, 'shim.js', null, 'private, no-cache');
   if (p === '/qr.js') return file(res, 'qr.js', null, 'private, max-age=86400');
   if (await claims(req, res, url, uid)) return;   // taking over history logged before you joined (claims.js)
+  // The receipt reader (Tesseract.js, its engine and the English data), shipped inside the app instead of loaded from a CDN.
+  if (/^\/vendor\/tesseract\/[a-z0-9-]+(\.[a-z0-9]+)+$/.test(p)) return file(res, p.slice(1), null, 'private, no-cache');
 
   // ---------- receipt photos ----------
   if (p === '/api/photo' && req.method === 'POST') {
