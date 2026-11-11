@@ -2108,9 +2108,9 @@ async function useFriendLinkFromUrl(){
 /* ================= HOME ================= */
 /* What's new, shown once per version on the laptop app. Keep it to three lines people will care about. */
 const NEWS = { v:'2.2.0', lines:[
-  ['Sign-in code', 'Add a second step from an authenticator app. It’s in your profile under Signing in.'],
-  ['Bring old expenses along', 'Invite someone you’ve been tracking by name. When they join, they take over that history. Friends find you by your @tag.'],
-  ['Ask your AI assistant', 'Connect Claude or Muse to your own Split it. It’s in your profile under AI assistants.'] ] };
+  ['History on every expense', 'Open one to see who added it and who changed what. Each group has an Activity list, and deletes go to the bin with a note to everyone in it.'],
+  ['Nothing lost offline', 'If a change you made offline can’t be saved, Split it tells you which one, with a Redo button.'],
+  ['Bring old expenses along', 'Invite someone you’ve been tracking by name. When they join, they take over that history. Friends find you by your @tag.'] ] };
 const newsSeen = () => { try{ return localStorage.getItem('hs.news'); }catch(e){ return NEWS.v; } };
 function newsCard(){
   if(!LAPTOP) return '';

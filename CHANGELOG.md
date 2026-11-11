@@ -1,6 +1,6 @@
 # What's new in Split it
 
-## v2.2.0 · Draft, not released yet
+## v2.2.0 · November 11, 2026
 
 **Safe to host, and easier to live with.** The server now checks the money on every save, every change leaves a trail, nothing you do offline is lost without a word, sign-in gets a second step, and backups leave the laptop locked.
 
@@ -14,6 +14,8 @@
 - **Sign-in code.** Add a 6-digit code from an authenticator app as a second step after your password, with backup codes for a lost phone.
 
 ### New
+- New home screen icons: a split house on yellow, with no characters.
+- Split it can be listed in the official MCP registry (server.json), so assistants and directories can find it.
 - History on every expense and payment: the last 20 changes, with who, when, and the old and new amount, title, date, shares and who paid.
 - Activity for each group: a new Activity button on the group page lists recent adds, changes, removals and payments. Tap one to open it.
 - Two people editing at once: if someone else saves an expense while you have it open, your save is stopped instead of overwriting theirs. The app says "Someone else changed this while you had it open. Have a look and try again." and shows you the new version.
